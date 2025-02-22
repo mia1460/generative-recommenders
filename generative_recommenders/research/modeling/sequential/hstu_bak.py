@@ -43,13 +43,7 @@ from generative_recommenders.research.modeling.similarity_module import (
     SequentialEncoderWithLearnedSimilarityModule,
 )
 from generative_recommenders.research.rails.similarities.module import SimilarityModule
-from generative_recommenders.research.modeling.cache.utils import (
-    get_next_layer_kv_diff_mask,
-    get_fusion_kv,
-    get_cached_lengths,
-)
 
-import time
 
 TIMESTAMPS_KEY = "timestamps"
 
@@ -295,13 +289,7 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
         invalid_attn_mask: torch.Tensor,
         delta_x_offsets: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         cache: Optional[HSTUCacheState] = None,
-        target_indices: torch.Tensor = None,
         return_cache_states: bool = False,
-        selective_reuse: bool = False,
-        recompute_mask: torch.Tensor = None,
-        # cached_lengths: torch.Tensor = None,
-        need_compute_mask: bool = False,
-        recompute_ratio: int = 20,
     ):
         """
         Args:
@@ -328,91 +316,26 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
             cached_v, cached_q, cached_k, cached_outputs = cache
 
         normed_x = self._norm_input(x)
-        # print(f"x_offsets is {x_offsets}")
 
-        mask = None
-        mask_stream = torch.cuda.Stream()
         if self._linear_config == "uvqk":
-            if selective_reuse == True and cache is not None and need_compute_mask == False:
-                # print(f"!!!selective_reuse and cache is not None and need_compute_mask == False")
-                # print(f"mask is all True? {recompute_mask.all()}")
-                kv_compute_begin_time = time.time()
-                cached_v, cached_q, cached_k, cached_outputs = cache
-                get_cache_end_time = time.time()
-                _u, _v, _q, _k = torch.split(
-                    self._uvqk,
-                    [
-                        self._linear_dim * self._num_heads,
-                        self._linear_dim * self._num_heads,
-                        self._attention_dim * self._num_heads,
-                        self._attention_dim * self._num_heads,
-                    ],
-                    dim=1,
-                )
-                # print(f"device: cached_k is {cached_k.device}, cached_v is {cached_v.device}, target_indices is {target_indices.device}")
-                split_end_time = time.time()
-                k, v = get_fusion_kv(
-                    cached_k=cached_k.to(x.device),
-                    cached_v=cached_v.to(x.device),
-                    x=normed_x,
-                    wk=_k,
-                    wv=_v,
-                    recompute_mask=recompute_mask,
-                    target_indices=target_indices,
-                    # cached_lengths=cached_lengths,
-                    # x_offsets=x_offsets
-                )
-                get_kv_end_time = time.time()
-                q = torch.mm(normed_x, _q)
-                u = torch.mm(normed_x, _u)
-                get_qu_end_time = time.time()
-                if self._linear_activation == "silu":
-                    u = F.silu(u)
-                    v = F.silu(v)
-                    q = F.silu(q)
-                    k = F.silu(k)
-                # print(f"get cache need {get_cache_end_time-kv_compute_begin_time:.6f} s, split need {split_end_time - get_cache_end_time:.6f} s,get_fusion_kv need {get_kv_end_time - split_end_time:.6f} s, get qu need {get_qu_end_time - get_kv_end_time:.6f} s, silu need {time.time()-get_qu_end_time:.6f} s")
-            else: # selective_reuse == False or cache is None or need_compute_mask == True
-                kv_compute_begin_time = time.time()
-                batched_mm_output = torch.mm(normed_x, self._uvqk)
-                mm_end_time = time.time()
-                if self._linear_activation == "silu":
-                    batched_mm_output = F.silu(batched_mm_output)
-                elif self._linear_activation == "none":
-                    batched_mm_output = batched_mm_output
-                silu_end_time = time.time()
-                u, v, q, k = torch.split(
-                    batched_mm_output,
-                    [
-                        self._linear_dim * self._num_heads,
-                        self._linear_dim * self._num_heads,
-                        self._attention_dim * self._num_heads,
-                        self._attention_dim * self._num_heads,
-                    ],
-                    dim=1,
-                )
-                # print(f"get mm_output need {mm_end_time-kv_compute_begin_time:.6f} s, silu need {silu_end_time-mm_end_time:.6f} s, split uvqk need {time.time()-silu_end_time:.6f} s")
-                with torch.cuda.stream(mask_stream):
-                    if selective_reuse == True and cache is not None and need_compute_mask == True:
-                        # begin_time = time.time()
-                        # print(f"~~~selective_reuse and cache is not None and need_compute_mask == True")
-                        cached_v, cached_q, cached_k, cached_outputs = cache
-                        mask = get_next_layer_kv_diff_mask(
-                            cached_k=cached_k.to(x.device),
-                            cached_v=cached_v.to(x.device),
-                            compute_k=k,
-                            compute_v=v,
-                            target_indices=target_indices.to(x.device),
-                            device=x.device,
-                            r=recompute_ratio,
-                        )
-                        # print(f"mask is all True? {mask.all()}")
-                        # print(f"computing mask need {time.time() - begin_time:.2f} s")                    
+            batched_mm_output = torch.mm(normed_x, self._uvqk)
+            if self._linear_activation == "silu":
+                batched_mm_output = F.silu(batched_mm_output)
+            elif self._linear_activation == "none":
+                batched_mm_output = batched_mm_output
+            u, v, q, k = torch.split(
+                batched_mm_output,
+                [
+                    self._linear_dim * self._num_heads,
+                    self._linear_dim * self._num_heads,
+                    self._attention_dim * self._num_heads,
+                    self._attention_dim * self._num_heads,
+                ],
+                dim=1,
+            )
         else:
             raise ValueError(f"Unknown self._linear_config {self._linear_config}")
-        kv_compute_end_time = time.time()
 
-        attn_begin_time = time.time()
         if delta_x_offsets is not None:
             v = cached_v.index_copy_(dim=0, index=delta_x_offsets[0], source=v)
 
@@ -518,19 +441,7 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
         if return_cache_states and delta_x_offsets is None:
             v = v.contiguous()
 
-        attn_end_time = time.time()
-        # print(f"computing kv need {kv_compute_end_time - kv_compute_begin_time:.6f} s, attn compute time is {attn_end_time - attn_begin_time:.6f} s")
-        mask_stream.synchronize()
-
-        # if need_compute_mask:
-        #     return new_outputs, (v, padded_q, padded_k, new_outputs), mask
-        # else:
-        #     return new_outputs, (v, padded_q, padded_k, new_outputs)
-        if need_compute_mask:
-            return new_outputs, (v, padded_q, k, new_outputs), mask
-        else:
-            return new_outputs, (v, padded_q, k, new_outputs)
-
+        return new_outputs, (v, padded_q, padded_k, new_outputs)
 
 
 class HSTUJagged(torch.nn.Module):
@@ -554,10 +465,7 @@ class HSTUJagged(torch.nn.Module):
         invalid_attn_mask: torch.Tensor,
         delta_x_offsets: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         cache: Optional[List[HSTUCacheState]] = None,
-        target_indices: torch.Tensor = None,
         return_cache_states: bool = False,
-        selective_reuse: bool = False,
-        recompute_ratio: int = 20,
     ) -> Tuple[torch.Tensor, List[HSTUCacheState]]:
         """
         Args:
@@ -572,67 +480,23 @@ class HSTUJagged(torch.nn.Module):
         """
         cache_states: List[HSTUCacheState] = []
 
-        # cached_lengths = None
-        recompute_mask = None
-        if selective_reuse and cache is not None:
-            if recompute_ratio==0: # fully use cache
-                # make mask init for fully use cache
-                x_len = x.shape[0]
-                recompute_mask = torch.ones(x_len, device=x.device, dtype=torch.bool)
-                recompute_mask[target_indices] = False
-
         with torch.autocast(
             "cuda",
             enabled=self._autocast_dtype is not None,
             dtype=self._autocast_dtype or torch.float16,
         ):
             for i, layer in enumerate(self._attention_layers):
-                # if i == 0 or i == 1 or i == 2: # need_compute_mask = True, will return mask
-                i0_need_compute_mask = True
-                if recompute_ratio == 0:
-                    i0_need_compute_mask = False
-                # prefetch_stream = torch.cuda.Stream()
-                # with torch.cuda.stream(prefetch_stream):
-                #     begin_time = time.time()
-                #     if i != 0 and i < len(self._attention_layers) - 1:
-                #         print(f"i is {i}")
-                #         cur_layer_cache = cache[i+1] if cache is not None else None
-                #     print(f"prefetch layer {i+1}'s time is {time.time() - begin_time:.6f} s")
-                if target_indices is not None:
-                    target_indices=target_indices.to(x.device)
-                if i == 0 and i0_need_compute_mask: 
-                    x, cache_states_i, recompute_mask = layer(
-                        x=x,
-                        x_offsets=x_offsets,
-                        all_timestamps=all_timestamps,
-                        invalid_attn_mask=invalid_attn_mask,
-                        delta_x_offsets=delta_x_offsets,
-                        cache=cache[i] if cache is not None else None,
-                        target_indices=target_indices,
-                        return_cache_states=return_cache_states,
-                        selective_reuse=selective_reuse,
-                        recompute_mask=recompute_mask,
-                        need_compute_mask=i0_need_compute_mask, # only compute the recompute_mask at the first layer
-                        recompute_ratio=recompute_ratio                       
-                    )
-                else:
-                    x, cache_states_i = layer(
-                        x=x,
-                        x_offsets=x_offsets,
-                        all_timestamps=all_timestamps,
-                        invalid_attn_mask=invalid_attn_mask,
-                        delta_x_offsets=delta_x_offsets,
-                        cache=cache[i] if cache is not None else None,
-                        target_indices=target_indices,
-                        return_cache_states=return_cache_states,
-                        selective_reuse=selective_reuse,
-                        recompute_mask=recompute_mask,
-                        need_compute_mask=False, # reuse the first layer's mask
-                        recompute_ratio=recompute_ratio,
-                    )
+                x, cache_states_i = layer(
+                    x=x,
+                    x_offsets=x_offsets,
+                    all_timestamps=all_timestamps,
+                    invalid_attn_mask=invalid_attn_mask,
+                    delta_x_offsets=delta_x_offsets,
+                    cache=cache[i] if cache is not None else None,
+                    return_cache_states=return_cache_states,
+                )
                 if return_cache_states:
                     cache_states.append(cache_states_i)
-                # prefetch_stream.synchronize()
 
         return x, cache_states
 
@@ -644,10 +508,7 @@ class HSTUJagged(torch.nn.Module):
         invalid_attn_mask: torch.Tensor,
         delta_x_offsets: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         cache: Optional[List[HSTUCacheState]] = None,
-        target_indices: torch.tensor = None,
         return_cache_states: bool = False,
-        selective_reuse: bool = False,
-        recompute_ratio: int = 20,
     ) -> Tuple[torch.Tensor, List[HSTUCacheState]]:
         """
         Args:
@@ -668,10 +529,7 @@ class HSTUJagged(torch.nn.Module):
             invalid_attn_mask=invalid_attn_mask,
             delta_x_offsets=delta_x_offsets,
             cache=cache,
-            target_indices=target_indices,
             return_cache_states=return_cache_states,
-            selective_reuse=selective_reuse,
-            recompute_ratio=recompute_ratio,
         )
         y = torch.ops.fbgemm.jagged_to_padded_dense(
             values=jagged_x,
@@ -818,10 +676,7 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
         past_payloads: Dict[str, torch.Tensor],
         delta_x_offsets: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         cache: Optional[List[HSTUCacheState]] = None,
-        cached_lengths: torch.Tensor = None,
         return_cache_states: bool = False,
-        selective_reuse: bool = False,
-        recompute_ratio: int = 20,
     ) -> Tuple[torch.Tensor, List[HSTUCacheState]]:
         """
         [B, N] -> [B, N, D].
@@ -837,17 +692,10 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
             past_payloads=past_payloads,
         )
 
-        x_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(past_lengths)
-        if selective_reuse == True:
-            target_indices = torch.cat([
-                torch.arange(x_offsets[i], x_offsets[i]+cached_lengths[i]) for i in range(cached_lengths.shape[0])
-            ])
-        else: target_indices = None
-
         float_dtype = user_embeddings.dtype
         user_embeddings, cached_states = self._hstu(
             x=user_embeddings,
-            x_offsets=x_offsets,
+            x_offsets=torch.ops.fbgemm.asynchronous_complete_cumsum(past_lengths),
             all_timestamps=(
                 past_payloads[TIMESTAMPS_KEY]
                 if TIMESTAMPS_KEY in past_payloads
@@ -856,12 +704,8 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
             invalid_attn_mask=1.0 - self._attn_mask.to(float_dtype),
             delta_x_offsets=delta_x_offsets,
             cache=cache,
-            target_indices=target_indices,
             return_cache_states=return_cache_states,
-            selective_reuse=selective_reuse,
-            recompute_ratio=recompute_ratio
         )
-        # print(f"!!!!!!!!!!!!!!!!asynchronous_complete_cumsum yes!!!!!!!!!!!!!!!!!")
         return self._output_postproc(user_embeddings), cached_states
 
     def forward(
@@ -902,10 +746,7 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
         past_payloads: Dict[str, torch.Tensor],
         delta_x_offsets: Optional[Tuple[torch.Tensor, torch.Tensor]],
         cache: Optional[List[HSTUCacheState]],
-        return_cache_states: bool = False,
-        cached_lengths: torch.Tensor = None,
-        selective_reuse: bool = False,
-        recompute_ratio: int = 20,
+        return_cache_states: bool,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[HSTUCacheState]]]:
         """
         Args:
@@ -925,10 +766,7 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
             past_payloads=past_payloads,
             delta_x_offsets=delta_x_offsets,
             cache=cache,
-            cached_lengths=cached_lengths,
             return_cache_states=return_cache_states,
-            selective_reuse=selective_reuse,
-            recompute_ratio=recompute_ratio,
         )  # [B, N, D]
         current_embeddings = get_current_embeddings(
             lengths=past_lengths, encoded_embeddings=encoded_seq_embeddings
@@ -946,10 +784,7 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
         past_payloads: Dict[str, torch.Tensor],
         delta_x_offsets: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         cache: Optional[List[HSTUCacheState]] = None,
-        cached_lengths: torch.Tensor = None,
         return_cache_states: bool = False,
-        selective_reuse: bool = False,
-        recompute_ratio: int = 20,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[HSTUCacheState]]]:
         """
         Runs encoder to obtain the current hidden states.
@@ -970,8 +805,5 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
             past_payloads=past_payloads,
             delta_x_offsets=delta_x_offsets,
             cache=cache,
-            cached_lengths=cached_lengths,
             return_cache_states=return_cache_states,
-            selective_reuse=selective_reuse,
-            recompute_ratio=recompute_ratio,
         )
