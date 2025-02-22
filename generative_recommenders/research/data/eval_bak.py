@@ -17,7 +17,7 @@
 import logging
 import sys
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Set, Union, Tuple
+from typing import Callable, Dict, List, Optional, Set, Union
 
 import torch
 import torch.distributed as dist
@@ -70,7 +70,6 @@ def get_eval_state(
         top_k_module=top_k_module_fn(eval_negative_embeddings, eval_negatives_ids),
     )
 
-HSTUCacheState = Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 
 @torch.inference_mode  # pyre-ignore [56]
 def eval_metrics_v2_from_tensors(
@@ -84,11 +83,6 @@ def eval_metrics_v2_from_tensors(
     filter_invalid_ids: bool = True,
     user_max_batch_size: Optional[int] = None,
     dtype: Optional[torch.dtype] = None,
-    cache: Optional[List[HSTUCacheState]] = None,
-    cached_lengths: torch.Tensor = None,
-    return_cache_states: bool = False,
-    selective_reuse: bool = False,
-    recompute_ratio: int = 20,
 ) -> Dict[str, Union[float, torch.Tensor]]:
     """
     Args:
@@ -111,40 +105,19 @@ def eval_metrics_v2_from_tensors(
 
     # computes ro- part exactly once.
     # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
-    # print(f"In eval_metrics_v2_from_tensors, cache is None? {cache is None}, return_cache_state is {return_cache_states}")
-    if return_cache_states:
-        shared_input_embeddings, updated_cache= model.encode(
-            past_lengths=seq_features.past_lengths,
-            past_ids=seq_features.past_ids,
-            # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
-            past_embeddings=model.get_item_embeddings(seq_features.past_ids),
-            past_payloads=seq_features.past_payloads,
-            cache=cache,
-            cached_lengths=cached_lengths,
-            return_cache_states=return_cache_states,
-            selective_reuse=selective_reuse,
-            recompute_ratio=recompute_ratio,
-        )
-    else:
-        shared_input_embeddings= model.encode(
-            past_lengths=seq_features.past_lengths,
-            past_ids=seq_features.past_ids,
-            # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
-            past_embeddings=model.get_item_embeddings(seq_features.past_ids),
-            past_payloads=seq_features.past_payloads,
-            cache=cache,
-            cached_lengths=cached_lengths,
-            return_cache_states=return_cache_states,
-            selective_reuse=selective_reuse,
-            recompute_ratio=recompute_ratio
-        )
+    shared_input_embeddings = model.encode(
+        past_lengths=seq_features.past_lengths,
+        past_ids=seq_features.past_ids,
+        # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
+        past_embeddings=model.get_item_embeddings(seq_features.past_ids),
+        past_payloads=seq_features.past_payloads,
+    )
     if dtype is not None:
         shared_input_embeddings = shared_input_embeddings.to(dtype)
 
     MAX_K = 2500
     k = min(MAX_K, eval_state.candidate_index.ids.size(1))
     user_max_batch_size = user_max_batch_size or shared_input_embeddings.size(0)
-    # print(f"user_max_batch_size is {user_max_batch_size}")
     num_batches = (
         shared_input_embeddings.size(0) + user_max_batch_size - 1
     ) // user_max_batch_size
@@ -241,11 +214,7 @@ def eval_metrics_v2_from_tensors(
             1.0, eval_ranks[target_ratings >= min_positive_rating]
         )
 
-    # return output  # pyre-ignore [7]
-    if return_cache_states:
-        return output, updated_cache
-    else:
-        return output # pyre-ignore [7]
+    return output  # pyre-ignore [7]
 
 
 def eval_recall_metrics_from_tensors(

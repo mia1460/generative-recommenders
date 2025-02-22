@@ -124,7 +124,8 @@ def train_fn(
     top_k_method: str = "MIPSBruteForceTopK",
     eval_interval: int = 100,
     full_eval_every_n: int = 1,
-    save_ckpt_every_n: int = 1000,
+    # save_ckpt_every_n: int = 1000,
+    save_ckpt_every_n: int = 1,
     partial_eval_num_iters: int = 32,
     embedding_module_type: str = "local",
     item_embedding_dim: int = 240,
@@ -504,7 +505,7 @@ def train_fn(
                 prefix="eval_epoch_full",
                 world_size=world_size,
             )
-        if rank == 0 and epoch > 0 and (epoch % save_ckpt_every_n) == 0:
+        if rank == 0 and epoch > 5 and (epoch % save_ckpt_every_n) == 0:
             torch.save(
                 {
                     "epoch": epoch,
@@ -519,6 +520,9 @@ def train_fn(
             f"NDCG@10 {ndcg_10:.4f}, NDCG@50 {ndcg_50:.4f}, HR@10 {hr_10:.4f}, HR@50 {hr_50:.4f}, MRR {mrr:.4f}"
         )
         last_training_time = time.time()
+
+        if epoch == 0:
+            break
 
     if rank == 0:
         if writer is not None:
