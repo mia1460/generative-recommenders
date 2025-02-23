@@ -46,12 +46,17 @@ from generative_recommenders.research.rails.similarities.module import Similarit
 from generative_recommenders.research.modeling.cache.utils import (
     get_next_layer_kv_diff_mask,
     get_fusion_kv,
-    get_cached_lengths,
+    # get_cached_lengths,
+)
+from generative_recommenders.research.modeling.cache.timer import (
+    CUDATimer,
 )
 
 import time
 
 TIMESTAMPS_KEY = "timestamps"
+
+# total_mm_time = 0
 
 
 class RelativeAttentionBiasModule(torch.nn.Module):
@@ -337,7 +342,11 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
                 # print(f"!!!selective_reuse and cache is not None and need_compute_mask == False")
                 # print(f"mask is all True? {recompute_mask.all()}")
                 kv_compute_begin_time = time.time()
-                cached_v, cached_q, cached_k, cached_outputs = cache
+                with CUDATimer("get cache", verbose=False) as get_cache_time:
+                    cached_v, cached_q, cached_k, cached_outputs = cache
+                    cached_k=cached_k.to(x.device)
+                    cached_v=cached_v.to(x.device)
+                # print(f"At STU.forward: cached_k.shape@{cached_k.shape}, normed_x.shape@{normed_x.shape}, get cache need {get_cache_time.get_time():.4f} ms")
                 get_cache_end_time = time.time()
                 _u, _v, _q, _k = torch.split(
                     self._uvqk,
@@ -352,13 +361,13 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
                 # print(f"device: cached_k is {cached_k.device}, cached_v is {cached_v.device}, target_indices is {target_indices.device}")
                 split_end_time = time.time()
                 k, v = get_fusion_kv(
-                    cached_k=cached_k.to(x.device),
-                    cached_v=cached_v.to(x.device),
+                    cached_k=cached_k,
+                    cached_v=cached_v,
                     x=normed_x,
                     wk=_k,
                     wv=_v,
                     recompute_mask=recompute_mask,
-                    target_indices=target_indices,
+                    target_indices=target_indices.to(normed_x.device),
                     # cached_lengths=cached_lengths,
                     # x_offsets=x_offsets
                 )
@@ -371,7 +380,7 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
                     v = F.silu(v)
                     q = F.silu(q)
                     k = F.silu(k)
-                # print(f"get cache need {get_cache_end_time-kv_compute_begin_time:.6f} s, split need {split_end_time - get_cache_end_time:.6f} s,get_fusion_kv need {get_kv_end_time - split_end_time:.6f} s, get qu need {get_qu_end_time - get_kv_end_time:.6f} s, silu need {time.time()-get_qu_end_time:.6f} s")
+                # print(f"At get_fusion_kv: cached_k.shape@{cached_k.shape}, normed_x.shape@{normed_x.shape}, get cache need {get_cache_end_time-kv_compute_begin_time:.6f} s, split need {split_end_time - get_cache_end_time:.6f} s,get_fusion_kv need {get_kv_end_time - split_end_time:.6f} s, get qu need {get_qu_end_time - get_kv_end_time:.6f} s, silu need {time.time()-get_qu_end_time:.6f} s")
             else: # selective_reuse == False or cache is None or need_compute_mask == True
                 kv_compute_begin_time = time.time()
                 batched_mm_output = torch.mm(normed_x, self._uvqk)
@@ -391,15 +400,20 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
                     ],
                     dim=1,
                 )
-                # print(f"get mm_output need {mm_end_time-kv_compute_begin_time:.6f} s, silu need {silu_end_time-mm_end_time:.6f} s, split uvqk need {time.time()-silu_end_time:.6f} s")
+                # if selective_reuse == False:
+                #     print(f"total mm time is {time.time()-kv_compute_begin_time:.6f}")
+                # print(f"At normal kv compute: normed_x.shape@{normed_x.shape}, get mm_output need {mm_end_time-kv_compute_begin_time:.6f} s, silu need {silu_end_time-mm_end_time:.6f} s, split uvqk need {time.time()-silu_end_time:.6f} s")
                 with torch.cuda.stream(mask_stream):
                     if selective_reuse == True and cache is not None and need_compute_mask == True:
-                        # begin_time = time.time()
+                        begin_time = time.time()
                         # print(f"~~~selective_reuse and cache is not None and need_compute_mask == True")
                         cached_v, cached_q, cached_k, cached_outputs = cache
+                        cached_k = cached_k.to(x.device)
+                        cached_v = cached_v.to(x.device)
+                        get_kv_end_time=time.time()
                         mask = get_next_layer_kv_diff_mask(
-                            cached_k=cached_k.to(x.device),
-                            cached_v=cached_v.to(x.device),
+                            cached_k=cached_k,
+                            cached_v=cached_v,
                             compute_k=k,
                             compute_v=v,
                             target_indices=target_indices.to(x.device),
@@ -407,7 +421,7 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
                             r=recompute_ratio,
                         )
                         # print(f"mask is all True? {mask.all()}")
-                        # print(f"computing mask need {time.time() - begin_time:.2f} s")                    
+                        # print(f"At compute next layer mask: cached_k.shape@{cached_k.shape}, normed_x.shape@{normed_x.shape}, get kv cache need {get_kv_end_time-begin_time:.6f} s, computing mask need {time.time() - get_kv_end_time:.6f} s")                    
         else:
             raise ValueError(f"Unknown self._linear_config {self._linear_config}")
         kv_compute_end_time = time.time()
@@ -518,7 +532,7 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
         if return_cache_states and delta_x_offsets is None:
             v = v.contiguous()
 
-        attn_end_time = time.time()
+        # attn_end_time = time.time()
         # print(f"computing kv need {kv_compute_end_time - kv_compute_begin_time:.6f} s, attn compute time is {attn_end_time - attn_begin_time:.6f} s")
         mask_stream.synchronize()
 
@@ -830,12 +844,14 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
         float_dtype = past_embeddings.dtype
         B, N, _ = past_embeddings.size()
 
+        # print(f"before input_features_preproc, past_embeddings is {past_embeddings}")
         past_lengths, user_embeddings, _ = self._input_features_preproc(
             past_lengths=past_lengths,
             past_ids=past_ids,
             past_embeddings=past_embeddings,
             past_payloads=past_payloads,
         )
+        # print(f"after input_features_preproc, past_embeddings is {past_embeddings}")
 
         x_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(past_lengths)
         if selective_reuse == True:

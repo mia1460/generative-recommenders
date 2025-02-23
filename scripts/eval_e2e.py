@@ -287,45 +287,48 @@ base_cache_list = torch.load(base_cache_path)
 cached_lengths_list = torch.load(cached_lengths_path)
 # print(f"base_cache_list[0][0][0].shape is {base_cache_list[0][0][0]}, cached_lengths_list[0] is {cached_lengths_list[0]}")
 
+if True:
+    run_an_e2e(
+        cache_use_type = "no",
+        data_loader=eval_delta_loader,
+        device=device,
+        gr_output_length=gr_output_length,
+        eval_state=eval_state,
+        model=model,
+        eval_batch_size=local_batch_size,
+        main_module_bf16=main_module_bf16,
+        world_size=world_size,
+        # enable_profiler=True,
+    )
 
-run_an_e2e(
-    cache_use_type = "no",
-    data_loader=eval_delta_loader,
-    device=device,
-    gr_output_length=gr_output_length,
-    eval_state=eval_state,
-    model=model,
-    eval_batch_size=local_batch_size,
-    main_module_bf16=main_module_bf16,
-    world_size=world_size,
-)
+if False:
+    run_an_e2e(
+        cache_use_type = "fully",
+        data_loader=eval_delta_loader,
+        device=device,
+        gr_output_length=gr_output_length,
+        eval_state=eval_state,
+        model=model,
+        eval_batch_size=local_batch_size,
+        main_module_bf16=main_module_bf16,
+        world_size=world_size,
+        base_cache_list=base_cache_list,
+        cached_lengths_list=cached_lengths_list,
+        # enable_profiler=True,
+    )
 
-run_an_e2e(
-    cache_use_type = "fully",
-    data_loader=eval_delta_loader,
-    device=device,
-    gr_output_length=gr_output_length,
-    eval_state=eval_state,
-    model=model,
-    eval_batch_size=local_batch_size,
-    main_module_bf16=main_module_bf16,
-    world_size=world_size,
-    base_cache_list=base_cache_list,
-    cached_lengths_list=cached_lengths_list,
-    # enable_profiler=True,
-)
-
-run_an_e2e(
-    cache_use_type = "selective",
-    data_loader=eval_delta_loader,
-    device=device,
-    gr_output_length=gr_output_length,
-    eval_state=eval_state,
-    model=model,
-    eval_batch_size=local_batch_size,
-    main_module_bf16=main_module_bf16,
-    world_size=world_size,
-    base_cache_list=base_cache_list,
-    cached_lengths_list=cached_lengths_list,
-    recompute_ratio=20,
-)
+    run_an_e2e(
+        cache_use_type = "selective",
+        data_loader=eval_delta_loader,
+        device=device,
+        gr_output_length=gr_output_length,
+        eval_state=eval_state,
+        model=model,
+        eval_batch_size=local_batch_size,
+        main_module_bf16=main_module_bf16,
+        world_size=world_size,
+        base_cache_list=base_cache_list,
+        cached_lengths_list=cached_lengths_list,
+        recompute_ratio=20,
+        # enable_profiler=True,
+    )

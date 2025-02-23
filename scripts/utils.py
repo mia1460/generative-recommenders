@@ -185,23 +185,20 @@ def run_an_e2e(
     base_cache_list=None,
     cached_lengths_list=None,
     recompute_ratio=20,
+    return_cache_states=False,
 ):
-    return_cache_states = True
     selective_reuse = True
 
     if cache_use_type == "no":
-        return_cache_states = False
         selective_reuse = False
     elif cache_use_type == "fully":
         assert base_cache_list is not None and cached_lengths_list is not None, \
             f"base_cache_list: {base_cache_list}, cached_lengths_list: {cached_lengths_list}"
-        return_cache_states = True
         selective_reuse = True
         recompute_ratio = 0
     elif cache_use_type == "selective":
         assert base_cache_list is not None and cached_lengths_list is not None, \
             f"base_cache_list: {base_cache_list}, cached_lengths_list: {cached_lengths_list}" 
-        return_cache_states = True
         selective_reuse = True
         recompute_ratio = recompute_ratio
     else:
@@ -256,7 +253,7 @@ def run_an_e2e(
                             target_ratings=target_ratings,
                             user_max_batch_size=eval_batch_size,
                             dtype=torch.bfloat16 if main_module_bf16 else None,
-                            cache=base_cache_list[eval_iter].to(device) if cache_use_type != "no" else None,
+                            cache=base_cache_list[eval_iter] if cache_use_type != "no" else None,
                             cached_lengths=cached_lengths_list[eval_iter] if cache_use_type != "no" else None,
                             return_cache_states=return_cache_states,
                             selective_reuse=selective_reuse,
@@ -279,6 +276,7 @@ def run_an_e2e(
             seq_features, target_ids, target_ratings = movielens_seq_features_from_row(
                 row, device=device, max_output_length=gr_output_length + 1
             )
+            # print(f"seq_features.past_embeddings is {seq_features.past_embeddings}")
             with torch.autograd.profiler.record_function(f"{cache_use_type}_cache"):
                 if return_cache_states:
                     eval_dict, updated_cache = eval_metrics_v2_from_tensors(
@@ -304,7 +302,7 @@ def run_an_e2e(
                         target_ratings=target_ratings,
                         user_max_batch_size=eval_batch_size,
                         dtype=torch.bfloat16 if main_module_bf16 else None,
-                        cache=base_cache_list[eval_iter].to(device) if cache_use_type != "no" else None,
+                        cache=base_cache_list[eval_iter] if cache_use_type != "no" else None,
                         cached_lengths=cached_lengths_list[eval_iter] if cache_use_type != "no" else None,
                         return_cache_states=return_cache_states,
                         selective_reuse=selective_reuse,
