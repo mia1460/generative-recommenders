@@ -31,6 +31,11 @@ from generative_recommenders.research.modeling.sequential.features import (
 )
 from generative_recommenders.research.rails.similarities.module import SimilarityModule
 from torch.utils.tensorboard import SummaryWriter
+from generative_recommenders.research.modeling.cache.timer import (
+    CUDATimer,
+)
+
+import time
 
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -108,38 +113,55 @@ def eval_metrics_v2_from_tensors(
         target_id = int(target_id)
         if target_id not in eval_state.all_item_ids:
             print(f"missing target_id {target_id}")
+    
+    # start = torch.cuda.Event(enable_timing=True)
+    # end = torch.cuda.Event(enable_timing=True)
+    # start.record()
+    # past_embeddings = model.get_item_embeddings(seq_features.past_ids)
+    # end.record()
+    # torch.cuda.synchronize()
+    # elapsed_time_ms = start.elapsed_time(end)
+    
 
     # computes ro- part exactly once.
     # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
     # print(f"In eval_metrics_v2_from_tensors, cache is None? {cache is None}, return_cache_state is {return_cache_states}")
-    if return_cache_states:
-        shared_input_embeddings, updated_cache= model.encode(
-            past_lengths=seq_features.past_lengths,
-            past_ids=seq_features.past_ids,
-            # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
-            past_embeddings=model.get_item_embeddings(seq_features.past_ids),
-            past_payloads=seq_features.past_payloads,
-            cache=cache,
-            cached_lengths=cached_lengths,
-            return_cache_states=return_cache_states,
-            selective_reuse=selective_reuse,
-            recompute_ratio=recompute_ratio,
-        )
-    else:
-        shared_input_embeddings= model.encode(
-            past_lengths=seq_features.past_lengths,
-            past_ids=seq_features.past_ids,
-            # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
-            past_embeddings=model.get_item_embeddings(seq_features.past_ids),
-            past_payloads=seq_features.past_payloads,
-            cache=cache,
-            cached_lengths=cached_lengths,
-            return_cache_states=return_cache_states,
-            selective_reuse=selective_reuse,
-            recompute_ratio=recompute_ratio
-        )
+    with CUDATimer("encode", verbose=False) as encode_time:
+        if return_cache_states:
+            shared_input_embeddings, updated_cache= model.encode(
+                past_lengths=seq_features.past_lengths,
+                past_ids=seq_features.past_ids,
+                # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
+                past_embeddings=model.get_item_embeddings(seq_features.past_ids),
+                past_payloads=seq_features.past_payloads,
+                cache=cache,
+                cached_lengths=cached_lengths,
+                return_cache_states=return_cache_states,
+                selective_reuse=selective_reuse,
+                recompute_ratio=recompute_ratio,
+            )
+        else:
+            shared_input_embeddings= model.encode(
+                past_lengths=seq_features.past_lengths,
+                past_ids=seq_features.past_ids,
+                # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
+                past_embeddings=model.get_item_embeddings(seq_features.past_ids),
+                past_payloads=seq_features.past_payloads,
+                cache=cache,
+                cached_lengths=cached_lengths,
+                return_cache_states=return_cache_states,
+                selective_reuse=selective_reuse,
+                recompute_ratio=recompute_ratio,
+            )
     if dtype is not None:
         shared_input_embeddings = shared_input_embeddings.to(dtype)
+    
+    # token_num = torch.sum(seq_features.past_lengths)
+    # print(f"token_num@{token_num}: encode need {encode_time.get_time():.4f} ms")
+
+
+    # print(f"get past_embeddings need {end_time - begin_time:.6f} s, encode need {time.time() - end_time:.6f} s")
+    # print(f"get past_embeddings need {elapsed_time_ms:.6f} ms")
 
     MAX_K = 2500
     k = min(MAX_K, eval_state.candidate_index.ids.size(1))
