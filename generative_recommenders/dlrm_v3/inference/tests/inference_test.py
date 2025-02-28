@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '/home/yinj@/workplace/generative-recommenders'))
 import unittest
 
 from generative_recommenders.common import gpu_unavailable

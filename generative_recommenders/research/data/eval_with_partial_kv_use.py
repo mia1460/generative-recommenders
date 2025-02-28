@@ -136,10 +136,10 @@ def eval_metrics_v2_from_tensors(
                 past_embeddings=model.get_item_embeddings(seq_features.past_ids),
                 past_payloads=seq_features.past_payloads,
                 cache=cache,
-                # cached_lengths=cached_lengths,
+                cached_lengths=cached_lengths,
                 return_cache_states=return_cache_states,
-                # selective_reuse=selective_reuse,
-                # recompute_ratio=recompute_ratio,
+                selective_reuse=selective_reuse,
+                recompute_ratio=recompute_ratio,
             )
         else:
             shared_input_embeddings= model.encode(
@@ -149,10 +149,10 @@ def eval_metrics_v2_from_tensors(
                 past_embeddings=model.get_item_embeddings(seq_features.past_ids),
                 past_payloads=seq_features.past_payloads,
                 cache=cache,
-                # cached_lengths=cached_lengths,
+                cached_lengths=cached_lengths,
                 return_cache_states=return_cache_states,
-                # selective_reuse=selective_reuse,
-                # recompute_ratio=recompute_ratio,
+                selective_reuse=selective_reuse,
+                recompute_ratio=recompute_ratio,
             )
     if dtype is not None:
         shared_input_embeddings = shared_input_embeddings.to(dtype)

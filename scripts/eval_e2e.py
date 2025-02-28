@@ -2,7 +2,7 @@ import logging
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"  # Hide excessive tensorflow debug messages
 os.environ['NUMEXPR_MAX_THREADS'] = '32'
-import numexpr
+# import numexpr
 import random
 import time
 from datetime import date
@@ -286,6 +286,8 @@ if NEED_SAVE_BC:
 base_cache_list = torch.load(base_cache_path)
 cached_lengths_list = torch.load(cached_lengths_path)
 # print(f"base_cache_list[0][0][0].shape is {base_cache_list[0][0][0]}, cached_lengths_list[0] is {cached_lengths_list[0]}")
+# print(f"the first user's cached length is {cached_lengths_list[0][0]}") # 43
+# print(f"base_cache: the first user's cached_k is {base_cache_list[0][-1][2][42]}")
 
 if True:
     run_an_e2e(
@@ -298,6 +300,9 @@ if True:
         eval_batch_size=local_batch_size,
         main_module_bf16=main_module_bf16,
         world_size=world_size,
+        return_cache_states=True,
+        # base_cache_list=base_cache_list,
+        # cached_lengths_list=cached_lengths_list,
         # enable_profiler=True,
     )
 
@@ -317,6 +322,7 @@ if False:
         # enable_profiler=True,
     )
 
+if False:
     run_an_e2e(
         cache_use_type = "selective",
         data_loader=eval_delta_loader,
@@ -330,5 +336,5 @@ if False:
         base_cache_list=base_cache_list,
         cached_lengths_list=cached_lengths_list,
         recompute_ratio=20,
-        # enable_profiler=True,
+        enable_profiler=True,
     )
