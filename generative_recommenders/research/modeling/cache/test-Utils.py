@@ -1,5 +1,71 @@
 # for i in enumerate(2):
 #     print(i)
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '/home/yinj@/workplace/generative-recommenders'))
+
+
+from utils import get_next_layer_padded_kv_recompute_mask
+import torch
+
+cached_k = torch.randn(3, 4, 5)
+cached_v = torch.randn(3, 4, 5)
+compute_k = torch.randn(3, 4, 5)
+compute_v = torch.randn(3, 4, 5)
+
+cached_mask = torch.tensor([
+    [True, True, False, False],
+    [True, False, False, False],
+    [True, True, True, False],
+], dtype=torch.bool)
+
+r = 50
+
+recompute_mask = get_next_layer_padded_kv_recompute_mask(cached_k, cached_v, compute_k, compute_v, cached_mask, r)
+
+print(f"recompute_mask is {recompute_mask}")
+
+if False:
+    from utils import get_padded_fusion_kv
+    import torch
+
+
+    cached_k = torch.randn(3, 4, 256)
+    cached_v = torch.randn(3, 4, 256)
+    x = torch.randn(3, 4, 256)
+    _uvqk = torch.randn(256, 1024)
+    linear_dim = 32
+    attention_dim = 32
+    num_heads = 8
+
+    recompute_mask = torch.tensor([
+        [True, True, False, False],
+        [True, True, True, False],
+        [True, True, True, True],
+    ], dtype=torch.bool)
+    print(f"recompute_mask.dtype is {recompute_mask.dtype}")
+
+    batched_mm_output = torch.matmul(x, _uvqk)
+    _, v, _, k = torch.split(
+        batched_mm_output,
+        [
+            linear_dim * num_heads,
+            linear_dim * num_heads,
+            attention_dim * num_heads,
+            attention_dim * num_heads,
+        ],
+        dim=2
+    )
+
+    print(f"v.shape is {v.shape}")
+
+    fusion_k, fusion_v = get_padded_fusion_kv(cached_k, cached_v, x, _uvqk, linear_dim, attention_dim, num_heads, recompute_mask)
+
+    print(f"cached_k is {cached_k}\nfusion_k is {fusion_k}\nk is {k}\ncached_v is {cached_v}\nfusion_v is {fusion_v}\nv id {v}\n")
+
+
+
+
 if False:
     from utils import get_fusion_k, get_cached_lengths, get_fusion_kv, get_same_masks, is_kv_correct
     import torch
@@ -56,7 +122,7 @@ if False:
     print(f"cached_lengths is {cached_lengths}")
 
 
-if True:
+if False:
     from utils import get_next_layer_kv_diff_mask, get_cached_lengths
     import torch
 
