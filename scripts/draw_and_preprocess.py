@@ -21,6 +21,39 @@ import pandas as pd
 # v = cached_v.index_copy_(dim=0, index=delta_x_offsets_0, source=v)
 # print(v)
 
+def truncate_sequences(row):
+    # 将字符串按逗号分割成列表
+    item_ids = row['sequence_item_ids'].split(',')
+    ratings = row['sequence_ratings'].split(',')
+    timestamps = row['sequence_timestamps'].split(',')
+
+    # 检查列表长度是否大于等于200
+    if len(item_ids) >= 200:
+        # 截取前200个元素
+        item_ids = item_ids[:200]
+        ratings = ratings[:200]
+        timestamps = timestamps[:200]
+
+        # 将处理后的列表重新拼接成字符串
+        row['sequence_item_ids'] = ','.join(item_ids)
+        row['sequence_ratings'] = ','.join(ratings)
+        row['sequence_timestamps'] = ','.join(timestamps)
+
+    return row
+
+def truncate_sequence_data(inputfile, outputfile):
+    file_path = inputfile
+    df = pd.read_csv(file_path)
+    df = df.apply(truncate_sequences, axis=1)
+
+    df.to_csv(outputfile, index=False)
+    print(f"data truncated by 200 saved at {outputfile}")
+
+input_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281.csv'
+output_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200.csv'
+
+# truncate_sequence_data(input_file, output_file)
+
 
 if False:
     # v_source_indices = torch.tensor([0, 1, 2, 5])
@@ -59,60 +92,95 @@ if False:
 def parse_log_file(log_file_path, output_csv_path):
     """
     解析日志文件并提取数据保存到 CSV 文件中
-    
+
     参数:
         log_file_path (str): 日志文件路径
         output_csv_path (str): 输出 CSV 文件路径
     """
-    # 定义正则表达式匹配关键数据（已适配 without 标签）
-    pattern = re.compile(
-        r"=+run (without|with fully use|with selective) cache=+\n"
-        r"time used: (\d+\.\d+)s\n"
-        r"rank 0: eval @ epoch (\d+), metrics are:\n"
-        r"NDCG@10 ([\d.]+), NDCG@50 ([\d.]+), HR@10 ([\d.]+), HR@50 ([\d.]+), MRR ([\d.]+)",
-        re.DOTALL
-    )
-    
     # 读取日志文件内容
-    with open(log_file_path, "r") as file:
+    with open(log_file_path, 'r', encoding='utf-8') as file:
         log_content = file.read()
-    
-    # 提取数据
-    matches = pattern.findall(log_content)
-    
-    # 将数据转换为 DataFrame
+
+    # 分割日志内容为各个模型块
+    model_blocks = re.split(r'(?=\[loading checkpoint\])', log_content)
+    model_blocks = [block.strip() for block in model_blocks if block.strip()]
+
     data = []
-    for match in matches:
-        cache_type, time_used, epoch, ndcg10, ndcg50, hr10, hr50, mrr = match
-        epoch = int(epoch)
-        if epoch==0:
-            continue
-        if cache_type == "without":
-            cache_type = "no"
-        elif cache_type == "with fully use":
-            cache_type = "full"
-        elif cache_type == "with selective":
-            cache_type = "selective"    
-        data.append({
-            "model": epoch,
-            "cache_type": cache_type,
-            "time_used": float(time_used),
-            "NDCG@10": float(ndcg10),
-            "NDCG@50": float(ndcg50),
-            "HR@10": float(hr10),
-            "HR@50": float(hr50),
-            "MRR": float(mrr)
-        })
-    
+    for block in model_blocks:
+        # 提取模型名称
+        model_match = re.search(r'\[loading checkpoint\] from: .*?/model_(base|\d+)\.ckpt', block)
+        model_name = model_match.group(1) if model_match else 'base'
+
+        # print(f"block is {block}\n\n\n")
+
+        # 匹配 `no` 和 `fully` 缓存评估块
+        cache_pattern = re.compile(
+            r'============== begin evaling use (no|fully) cache\.\.\.==============\n'
+            # r'eval use \w+ cache need avg : ([\d.]+) ms\n'
+            r'eval use \w+ cache need: ([\d.]+) ms\n'
+            r'metrics are: NDCG@10 ([\d.]+), NDCG@50 ([\d.]+), HR@10 ([\d.]+), HR@50 ([\d.]+), MRR ([\d.]+)',
+            re.MULTILINE
+        )
+        cache_matches = cache_pattern.findall(block)
+
+        for match in cache_matches:
+            cache_type, time_used, ndcg10, ndcg50, hr10, hr50, mrr = match
+            data.append({
+                "model": model_name,
+                "cache_type": cache_type,
+                "time_used": float(time_used),
+                "NDCG@10": float(ndcg10),
+                "NDCG@50": float(ndcg50),
+                "HR@10": float(hr10),
+                "HR@50": float(hr50),
+                "MRR": float(mrr)
+            })
+
+        # 处理 `selective` 缓存评估块，注意额外的一行 `!!!recompute_ratio is XX!!!`
+        selective_pattern = re.compile(
+            r'============== begin evaling use selective cache\.\.\.==============\n'
+            r'!!!recompute_ratio is \d+!!!\n'  # 允许匹配 `recompute_ratio` 这行
+            # r'eval use selective cache need avg : ([\d.]+) ms\n'
+            r'eval use selective cache need: ([\d.]+) ms\n'
+            r'metrics are: NDCG@10 ([\d.]+), NDCG@50 ([\d.]+), HR@10 ([\d.]+), HR@50 ([\d.]+), MRR ([\d.]+)',
+            re.MULTILINE
+        )
+        selective_matches = selective_pattern.findall(block)
+
+        for match in selective_matches:
+            time_used, ndcg10, ndcg50, hr10, hr50, mrr = match
+            data.append({
+                "model": model_name,
+                "cache_type": "selective",
+                "time_used": float(time_used),
+                "NDCG@10": float(ndcg10),
+                "NDCG@50": float(ndcg50),
+                "HR@10": float(hr10),
+                "HR@50": float(hr50),
+                "MRR": float(mrr)
+            })
+
+    # 转换为 DataFrame 并保存
     df = pd.DataFrame(data)
-    
-    # 保存到 CSV 文件
     df.to_csv(output_csv_path, index=False)
     print(f"log data saved at: {output_csv_path}")
-    
     return df
 
-def plot_selected_models(csv_path, selected_models, output_dir=None):
+
+# test_3_type_log_path = '/home/yinj@/datas/grkvc/result_logs/test_15_models_3_types.log'
+# output_log_csv_path = '/home/yinj@/datas/grkvc/result_logs/test_15_models_3_types.csv'
+# df = parse_log_file(test_3_type_log_path, output_log_csv_path)
+
+test_3_type_on_gpu_log_path = '/home/yinj@/datas/grkvc/result_logs/test_15_models_3_types_cache_on_gpu.log'
+test_3_type_on_gpu_csv_path = '/home/yinj@/datas/grkvc/result_logs/test_15_models_3_types_cache_on_gpu.csv'
+# parse_log_file(test_3_type_on_gpu_log_path, test_3_type_on_gpu_csv_path)
+
+test_3_type_on_gpu_log_avg_time_path = '/home/yinj@/datas/grkvc/result_logs/test_15_models_3_types_cache_on_gpu_w_avg_time.log'
+test_3_type_on_gpu_csv_avg_time_path = '/home/yinj@/datas/grkvc/result_logs/test_15_models_3_types_cache_on_gpu_w_avg_time.csv'
+# parse_log_file(test_3_type_on_gpu_log_avg_time_path, test_3_type_on_gpu_csv_avg_time_path)
+
+
+def plot_selected_models(csv_path, selected_models, pic_prefix, output_dir=None):
     """
     可视化指定模型的缓存性能数据
     
@@ -126,16 +194,21 @@ def plot_selected_models(csv_path, selected_models, output_dir=None):
     
     # 设置输出路径
     if not output_dir:
-        output_dir = "/data/xieminhui/yinj/workplace/gr-kvCache/newGR/graphs"
+        output_dir = "/home/yinj@/datas/grkvc/graphs"
     
     # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
+    print(f"selected_models is {selected_models}")
+
+    df["model"] = df["model"].astype(str)
+    selected_models = [str(m) for m in selected_models]
     
     # 过滤出选定模型的数据
     filtered_df = df[df["model"].isin(selected_models)]
+    # print(filtered_df)
     
     # 配置可视化参数
-    cache_colors = {"no": "#4C72B0", "full": "#DD8452", "selective": "#55A868"}  # 更柔和的配色
+    cache_colors = {"no": "#4C72B0", "fully": "#DD8452", "selective": "#55A868"}  # 更柔和的配色
     metric_colors = ["#4C72B0", "#DD8452", "#55A868"]
     
     # =====================
@@ -161,7 +234,7 @@ def plot_selected_models(csv_path, selected_models, output_dir=None):
             y="time_used",
             data=model_data,
             palette=cache_colors,
-            order=["no", "full", "selective"],
+            order=["no", "fully", "selective"],
             width=0.39,
             ax=axes_time[row, col]
         )
@@ -172,7 +245,7 @@ def plot_selected_models(csv_path, selected_models, output_dir=None):
     
     # 调整布局并保存
     plt.tight_layout()
-    time_path = os.path.join(output_dir, "running_time_comparison.png")
+    time_path = os.path.join(output_dir, pic_prefix+"_running_time_comparison.png")
     plt.savefig(time_path, bbox_inches="tight", dpi=150)
     plt.close()
     print(f"Running time comparison plot saved to: {time_path}")
@@ -208,7 +281,7 @@ def plot_selected_models(csv_path, selected_models, output_dir=None):
             hue="cache_type",
             data=metrics_df,
             palette=cache_colors,
-            hue_order=["no", "full", "selective"],
+            hue_order=["no", "fully", "selective"],
             ax=axes_metrics[row, col]
         )
         axes_metrics[row, col].set_title(f"Model {model}", fontsize=24)
@@ -219,10 +292,15 @@ def plot_selected_models(csv_path, selected_models, output_dir=None):
     
     # 调整布局并保存
     plt.tight_layout()
-    metric_path = os.path.join(output_dir, "metrics_comparison.png")
+    metric_path = os.path.join(output_dir, pic_prefix+"_metrics_comparison.png")
     plt.savefig(metric_path, bbox_inches="tight", dpi=150)
     plt.close()
     print(f"Metrics comparison plot saved to: {metric_path}")
+
+selected_models = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+# plot_selected_models(csv_path=output_log_csv_path, selected_models=selected_models)
+# plot_selected_models(csv_path=test_3_type_on_gpu_csv_path, selected_models=selected_models, pic_prefix="test_3_type_on_gpu")
+# plot_selected_models(csv_path=test_3_type_on_gpu_csv_avg_time_path, selected_models=selected_models, pic_prefix="test_3_type_on_gpu_csv_avg_time")
 
 def plot_model5_comparison(csv_path, model_num, metric, output_dir=None):
     """
@@ -477,7 +555,8 @@ def plot_kv_diff_correlation(kv_diff_file, graph_name):
 diff_kv_path = "/data/xieminhui/yinj/workplace/gr-kvCache/newGR/data/diff_kv/base_step1_diff_kv.pt"
 # plot_kv_diff_correlation(diff_kv_path, "base_step1_diff")
 
-def remove_last_x_sequences(input_filename, output_filename, x):
+def remove_last_x_sequences(input_filename, output_filename, begin, end):
+    import random
     # 打开输入文件和输出文件
     with open(input_filename, mode='r', newline='', encoding='utf-8') as infile, \
          open(output_filename, mode='w', newline='', encoding='utf-8') as outfile:
@@ -496,6 +575,8 @@ def remove_last_x_sequences(input_filename, output_filename, x):
             sequence_item_ids = row['sequence_item_ids'].split(',')
             sequence_ratings = row['sequence_ratings'].split(',')
             sequence_timestamps = row['sequence_timestamps'].split(',')
+            x = random.randint(begin, end)
+            print(f"x is {x}")
             
             # 确保不去除超过序列长度的部分
             if len(sequence_item_ids) > x:
@@ -528,10 +609,15 @@ x = 5
 # input_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test.csv'
 # output_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_loss_last'+str(x)+'.csv'
 
-input_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281.csv'
-output_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_loss_last_'+str(x)+'.csv'
+# input_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281.csv'
+# output_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_loss_last_'+str(x)+'.csv'
 
-remove_last_x_sequences(input_filename, output_filename, x)
+# input_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200.csv'
+# output_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200_loss_last_' + str(x) +'.csv'
+
+input_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200.csv'
+output_filename = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200_loss_last_random_1_to_no_' + str(x) +'.csv'
+# remove_last_x_sequences(input_filename, output_filename, 1, x - 1)
 
 def compute_kv_diff(
     file_A,
@@ -737,7 +823,7 @@ kv_name = 'base_step1_diff_kv.pt'
 
 base_cache_list_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/base_cache_list.pt'
 cached_lengths_list_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/cached_lengths_list.pt'
-base_cache_list = torch.load(base_cache_list_path)
+# base_cache_list = torch.load(base_cache_list_path)
 
 # cached_lengths_list = torch.load(cached_lengths_list_path)
 # x_lengths = cached_lengths_list[0]

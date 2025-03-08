@@ -95,6 +95,11 @@ def eval_metrics_v2_from_tensors(
     selective_reuse: bool = False,
     recompute_ratio: int = 20,
     return_encode_time: bool = False,
+    use_all_padded: bool = False,
+    delta_x_offsets: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    return_encoded_embeddings: bool = False,
+    cached_mask: torch.Tensor = None,
+    r: int = 20,
 ) -> Dict[str, Union[float, torch.Tensor]]:
     """
     Args:
@@ -115,18 +120,6 @@ def eval_metrics_v2_from_tensors(
         if target_id not in eval_state.all_item_ids:
             print(f"missing target_id {target_id}")
     
-    # start = torch.cuda.Event(enable_timing=True)
-    # end = torch.cuda.Event(enable_timing=True)
-    # start.record()
-    # past_embeddings = model.get_item_embeddings(seq_features.past_ids)
-    # end.record()
-    # torch.cuda.synchronize()
-    # elapsed_time_ms = start.elapsed_time(end)
-    
-
-    # computes ro- part exactly once.
-    # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
-    # print(f"In eval_metrics_v2_from_tensors, cache is None? {cache is None}, return_cache_state is {return_cache_states}")
     with CUDATimer("encode", verbose=False) as encode_time:
         if return_cache_states:
             shared_input_embeddings, updated_cache= model.encode(
@@ -136,10 +129,11 @@ def eval_metrics_v2_from_tensors(
                 past_embeddings=model.get_item_embeddings(seq_features.past_ids),
                 past_payloads=seq_features.past_payloads,
                 cache=cache,
-                # cached_lengths=cached_lengths,
                 return_cache_states=return_cache_states,
-                # selective_reuse=selective_reuse,
-                # recompute_ratio=recompute_ratio,
+                use_all_padded=use_all_padded,
+                delta_x_offsets=delta_x_offsets,
+                cached_mask=cached_mask,
+                r=r,
             )
         else:
             shared_input_embeddings= model.encode(
@@ -149,10 +143,11 @@ def eval_metrics_v2_from_tensors(
                 past_embeddings=model.get_item_embeddings(seq_features.past_ids),
                 past_payloads=seq_features.past_payloads,
                 cache=cache,
-                # cached_lengths=cached_lengths,
                 return_cache_states=return_cache_states,
-                # selective_reuse=selective_reuse,
-                # recompute_ratio=recompute_ratio,
+                use_all_padded=use_all_padded,
+                delta_x_offsets=delta_x_offsets,
+                cached_mask=cached_mask,
+                r=r,
             )
     if dtype is not None:
         shared_input_embeddings = shared_input_embeddings.to(dtype)
@@ -268,14 +263,27 @@ def eval_metrics_v2_from_tensors(
     # return output  # pyre-ignore [7]
     if return_cache_states:
         if return_encode_time:
-            return output, updated_cache, encode_time.get_time() 
+            if return_encoded_embeddings:
+                return output, updated_cache, encode_time.get_time(), shared_input_embeddings
+            else:
+                return output, updated_cache, encode_time.get_time()
         else:
-            return output, updated_cache
+            if return_encoded_embeddings:
+                return output, updated_cache, shared_input_embeddings
+            else:
+                return output, updated_cache
     else:
         if return_encode_time:
-            return output, encode_time.get_time()
+            if return_encoded_embeddings:
+                return output, encode_time.get_time(), shared_input_embeddings
+            else:
+                return output, encode_time.get_time()
         else:
-            return output # pyre-ignore [7]
+            if return_encoded_embeddings:
+                return output, shared_input_embeddings
+            else:
+                return output # pyre-ignore [7]
+        
 
 
 def eval_recall_metrics_from_tensors(

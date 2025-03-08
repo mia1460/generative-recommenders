@@ -78,30 +78,11 @@ class LearnablePositionalEmbeddingInputFeaturesPreprocessor(
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, N = past_ids.size()
         D = past_embeddings.size(-1)
-        # print(f"!!!!!!!!!!!!!this embdding module !!!!!!!!!!!")
-        position_ids = torch.arange(N, device=past_ids.device).unsqueeze(0).repeat(B, 1) # [128, 211]
-        # print(f"past_embeddings.shape is {past_embeddings.shape}") # [128, 211, 256]
-        # print(f"past_lengths[0] is {past_lengths[0]}, past_embeddings[0][47] is {past_embeddings[0][47]}, past_embeddings[0][48] is {past_embeddings[0][48]}, past_embeddings[0][49] is {past_embeddings[0][49]}")
-        # print(f"past_lengths[1] is {past_lengths[1]}, past_ids: [0] is {past_ids[0]}, while [1] is {past_ids[1]}")
-        # position_ids[1, :5]=torch.tensor([43, 44, 45, 46, 47], device=past_ids.device)
-        # print(f"past_ids are:\n [0] is {past_ids[0]}\n[1] is {past_ids[1]}, past_lengths[0] is {past_lengths[0]}")
-        # print(f"past_embeddings are {past_embeddings[0, 44:49]}")
-
-        # use_delta_inference = False
-        # if use_delta_inference:
-        #     position_ids[1, :5] = torch.arange(past_lengths[0]-5, past_lengths[0], device=past_ids.device)
-        # print(f"position_ids[:2] is {position_ids[:2]}")
-
-        # print(f"past_embeddings full is {past_embeddings[0, 45:48]}, while delta is {past_embeddings[1, :3]}")
-        # print(f"past_embeddings is equal? {past_embeddings[0, 43:48].equal(past_embeddings[1, :5])}")
-
+        
         user_embeddings = past_embeddings * (self._embedding_dim**0.5) + self._pos_emb(
-            position_ids
+            torch.arange(N, device=past_ids.device).unsqueeze(0).repeat(B, 1)
         )
         user_embeddings = self._emb_dropout(user_embeddings)
-
-        # print(f"user_embeddings is equal? {user_embeddings[0, past_lengths[0]-5:past_lengths[0]].equal(user_embeddings[1, :5])}")
-        # print(f"use_embeddings full is {user_embeddings[0, 43:48]}, while delta is {user_embeddings[1, :5]}")
 
         valid_mask = (past_ids != 0).unsqueeze(-1).float()  # [B, N, 1]
         user_embeddings *= valid_mask

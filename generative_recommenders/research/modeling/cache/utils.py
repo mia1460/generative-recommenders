@@ -88,6 +88,7 @@ def get_padded_fusion_kv(
     _num_heads: int,
     recompute_mask: torch.Tensor # (B, N)
 ):
+    print(f"before fusion, cached_k.shape is {cached_k.shape}, cached_v.shape is {cached_v.shape}")
     _, _v, _, _k = torch.split(
         _uvqk,
         [
@@ -99,18 +100,20 @@ def get_padded_fusion_kv(
         dim=1,
     )
     mask = recompute_mask.unsqueeze(-1)
-    fusion_k = torch.where(mask, torch.matmul(x, _k), cached_k)
-    fusion_v = torch.where(mask, torch.matmul(x, _v), cached_v)
+    print(f"mask is {mask.shape}, x*_k is {torch.matmul(x, _k).shape}")
+    fusion_k = torch.where(mask, torch.nn.functional.silu(torch.matmul(x, _k)), cached_k)
+    fusion_v = torch.where(mask, torch.nn.functional.silu(torch.matmul(x, _k)), cached_v)
 
     return fusion_k, fusion_v
 
-def create_cached_mask(
+def get_cached_mask(
     cached_lengths: torch.Tensor, # (B,)
     max_sequence_length: int, 
     device: torch.device, 
 ):
     indices = torch.arange(max_sequence_length, device=device)
     mask = indices < cached_lengths.unsqueeze(1)
+    # print(f"mask is {mask.shape}")
     return mask
 
 def get_next_layer_padded_kv_recompute_mask(
@@ -121,12 +124,13 @@ def get_next_layer_padded_kv_recompute_mask(
     cached_mask: torch.Tensor, # (B, N)
     r: int=20,
 ):
+    # print(f" cached_mask.shape is {cached_mask.shape}")
     diff_k = (cached_k - compute_k).abs().sum(dim=-1)
     diff_v = (cached_v - compute_v).abs().sum(dim=-1)
     diff_total =  diff_k + diff_v
 
     masked_diff = torch.where(cached_mask, diff_total, -torch.inf)
-    print(f"masked_diff is {masked_diff}")
+    # print(f"masked_diff is {masked_diff}")
 
     cached_total = cached_mask.sum().float()
     if cached_total == 0:
@@ -139,7 +143,7 @@ def get_next_layer_padded_kv_recompute_mask(
     
     flat_diff = masked_diff.flatten()
     _, flat_indices = torch.topk(flat_diff, k=k, largest=True, sorted=False)
-    print(f"flat_indices is {flat_indices}")
+    # print(f"flat_indices is {flat_indices}")
 
     recompute_mask = torch.zeros_like(cached_mask, dtype=torch.bool)
     recompute_mask.view(-1)[flat_indices] = True
@@ -163,4 +167,32 @@ def get_next_layer_padded_kv_recompute_mask(
 
     return recompute_mask
     
+def get_recompute_indices(
+    cached_k: torch.Tensor, # [B, N, D]
+    cached_v: torch.Tensor, # [B, N, D]
+    compute_k: torch.Tensor, # [B, N, D]
+    compute_v: torch.Tensor, # [B, N, D]
+    valid_mask: torch.Tensor, # [B, N]
+    use_percentage: bool = False, 
+    r: int = 10, # if use_percentage == True, choose top r%, else choose top r
+):
+
+    diff_k = (cached_k - compute_k).abs().sum(dim=-1)
+    diff_v = (cached_v - compute_v).abs().sum(dim=-1)
+    diff_total =  diff_k + diff_v
+
+    valid_diff = torch.where(valid_mask, diff_total, -torch.inf)    
+
+    cached_total = valid_mask.sum().float()
+    if use_percentage:
+        k = int(cached_total * r / 100)
+    else:
+        k = r
+
+    flat_diff = valid_diff.flatten()
+    _, flat_indices = torch.topk(flat_diff, k=k, largest=True, sorted=False)
+    # print(f"flat_indices is {flat_indices}")
+
+    recompute_mask = torch.zeros_like(valid_mask, dtype=torch.bool)
+    recompute_mask.view(-1)[flat_indices] = True
     

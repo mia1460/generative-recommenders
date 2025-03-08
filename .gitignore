@@ -2,6 +2,7 @@
 tmp/
 exps/
 ckpts/
+generative_recommenders/dlrm_v3/data/KuaiRand-1K/data/*.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -157,4 +158,4 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-generative_recommenders/dlrm_v3/data/KuaiRand-1K/data/*.csv
+

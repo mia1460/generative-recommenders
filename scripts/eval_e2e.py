@@ -2,6 +2,7 @@ import logging
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"  # Hide excessive tensorflow debug messages
 os.environ['NUMEXPR_MAX_THREADS'] = '32'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 # import numexpr
 import random
 import time
@@ -9,6 +10,11 @@ from datetime import date
 from typing import Dict, Optional
 import gin
 import torch
+
+# torch.set_printoptions(
+#     profile="full",  # 显示所有元素（禁用截断）
+#     linewidth=300    # 设置每行最大宽度（防止换行）
+# )
 # torch.ops.load_library('/home/yinj@/tools/miniconda3/envs/grKVCPy310/lib/python3.10/site-packages/fbgemm_gpu/fbgemm_gpu_py.so')
 import torch.distributed as dist
 import sys
@@ -62,7 +68,7 @@ from generative_recommenders.research.data.dataset import DatasetV2, MultiFileDa
 # import torchvision.models as models
 from torch.profiler import profile, record_function, ProfilerActivity
 
-from utils import load_ckpt, get_filtered_config, print_eval_metrics, save_base_cache_and_lengths, run_an_e2e
+from utils import load_ckpt, get_filtered_config, print_eval_metrics, save_base_cache_and_lengths, run_an_e2e, run_3_type
 
 
 
@@ -121,19 +127,23 @@ filtered_config = get_filtered_config(config_file, "hstu_encoder")
 gin.parse_config(filtered_config)
 
 # create eval datasets
-eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_loss_last5.csv'
-eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test.csv'
+# eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_loss_last5.csv'
+# eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test.csv'
+
+eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200_loss_last_5.csv'
+eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200.csv'
+eval_random_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200_loss_last_random_1_to_no_5.csv'
 eval_base_dataset = DatasetV2(
     ratings_file=eval_base_path,
     padding_length = max_sequence_length + 1,
-    ignore_last_n=1,
+    ignore_last_n=0,
     chronological=True,
     sample_ratio=1.0
 )
 eval_delta_dataset = DatasetV2(
-    ratings_file=eval_delta_path,
+    ratings_file=eval_random_delta_path,
     padding_length = max_sequence_length + 1,
-    ignore_last_n=1,
+    ignore_last_n=0,
     chronological=True,
     sample_ratio=1.0
 )
@@ -150,6 +160,7 @@ eval_base_sampler, eval_base_loader = create_data_loader(
 eval_delta_sampler, eval_delta_loader = create_data_loader(
     eval_delta_dataset,
     batch_size=local_batch_size,
+    # batch_size=1,
     world_size=world_size,
     rank=rank,
     shuffle=False,
@@ -250,6 +261,7 @@ else:
 # load ckpt
 base_ckpt_path='/home/yinj@/datas/grkvc/ckpts/ml-20m/model_base.ckpt'
 model_1_path='/home/yinj@/datas/grkvc/ckpts/ml-20m/model_1.ckpt'
+model_15_path='/home/yinj@/datas/grkvc/ckpts/ml-20m/model_15.ckpt'
 
 ckpt_prefix = '/home/yinj@/datas/grkvc/ckpts/ml-20m/model_'
 
@@ -277,22 +289,34 @@ eval_state = get_eval_state(
     float_dtype=torch.bfloat16 if main_module_bf16 else None,
 )
 
-base_cache_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/base_cache_list.pt'
-cached_lengths_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/cached_lengths_list.pt'
-print(f"eval_batch_size is {local_batch_size}")
+# base_cache_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/base_cache_list.pt'
+# cached_lengths_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/cached_lengths_list.pt'
+
+# base_cache_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/base_padded_cache_1281_list.pt'
+# cached_lengths_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/padded_cached_lengths_1281_list.pt'
+
+# base_cache_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/base_padded_full_cache_1281_max_200_list.pt'
+# cached_lengths_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/padded_cached_lengths_1281_max_200_list.pt'
+
+base_cache_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/base_padded_kv_cache_1281_max_200_on_gpu_list.pt'
+cached_lengths_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/padded_cached_lengths_1281_max_200_on_gpu_list.pt'
+
+# print(f"eval_batch_size is {local_batch_size}")
 if NEED_SAVE_BC:
     save_base_cache_and_lengths(data_loader=eval_base_loader, device=device, gr_output_length=gr_output_length, eval_state=eval_state, model=model, eval_batch_size=local_batch_size, main_module_bf16=main_module_bf16, world_size=world_size, base_cache_path=base_cache_path, cached_lengths_path=cached_lengths_path)
 
 base_cache_list = torch.load(base_cache_path)
 cached_lengths_list = torch.load(cached_lengths_path)
+# print(f"base_cache_list[0].len is {len(base_cache_list[0])}")
+# print(f"base_cache_list[0][0] is {base_cache_list[0][0]}")
 # print(f"base_cache_list[0][0][0].shape is {base_cache_list[0][0][0]}, cached_lengths_list[0] is {cached_lengths_list[0]}")
 # print(f"the first user's cached length is {cached_lengths_list[0][0]}") # 43
-# print(f"base_cache: the first user's cached_k is {base_cache_list[0][-1][2][42]}")
-
+# print(f"base_cache: the first user's cached_k is {base_cache_list[0][:][2][:cached_lengths_list[0][0]].shape}\ncached_v is {base_cache_list[0][:][0][:cached_lengths_list[0][0]].shape}")
 if True:
     run_an_e2e(
         cache_use_type = "no",
         data_loader=eval_delta_loader,
+        # data_loader=eval_base_loader,
         device=device,
         gr_output_length=gr_output_length,
         eval_state=eval_state,
@@ -300,16 +324,17 @@ if True:
         eval_batch_size=local_batch_size,
         main_module_bf16=main_module_bf16,
         world_size=world_size,
-        return_cache_states=True,
-        # base_cache_list=base_cache_list,
-        # cached_lengths_list=cached_lengths_list,
+        return_cache_states=False,
+        use_all_padded=True,
+        return_encoded_embeddings=False,
         # enable_profiler=True,
     )
 
-if False:
+# if True:
     run_an_e2e(
         cache_use_type = "fully",
         data_loader=eval_delta_loader,
+        # data_loader=eval_base_loader,
         device=device,
         gr_output_length=gr_output_length,
         eval_state=eval_state,
@@ -317,10 +342,14 @@ if False:
         eval_batch_size=local_batch_size,
         main_module_bf16=main_module_bf16,
         world_size=world_size,
+        return_cache_states=False,
+        use_all_padded=True,
         base_cache_list=base_cache_list,
         cached_lengths_list=cached_lengths_list,
+        return_encoded_embeddings=False,
         # enable_profiler=True,
     )
+
 
 if False:
     run_an_e2e(
@@ -335,6 +364,19 @@ if False:
         world_size=world_size,
         base_cache_list=base_cache_list,
         cached_lengths_list=cached_lengths_list,
-        recompute_ratio=20,
-        enable_profiler=True,
+        use_all_padded=True,
+        r=50,
+        # enable_profiler=True,
     )
+
+if False:
+    for i in range(1, 16):
+        ckpt_path = ckpt_prefix + str(i) + '.ckpt'
+    
+        load_ckpt(
+            ckpt_path = ckpt_path,
+            model = model,
+            device = device
+        )
+    
+        run_3_type(eval_delta_loader, device, gr_output_length, eval_state, model, local_batch_size, main_module_bf16, world_size, enable_profiler=False, base_cache_list=base_cache_list, cached_lengths_list=cached_lengths_list, r=20)
