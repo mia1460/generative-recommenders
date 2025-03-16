@@ -41,6 +41,10 @@ def get_reco_dataset(
     max_sequence_length: int,
     chronological: bool,
     positional_sampling_ratio: float = 1.0,
+    items_path: str = None,
+    ignore_last_n: int = 1,
+    train_path: str = None,
+    eval_path: str = None,
 ) -> RecoDataset:
     if dataset_name == "ml-1m":
         dp = get_common_preprocessors()[dataset_name]
@@ -104,6 +108,24 @@ def get_reco_dataset(
             shift_id_by=1,  # [0..n-1] -> [1..n]
             chronological=chronological,
         )
+    elif dataset_name == "user_diy":
+        train_dataset = DatasetV2(
+            ratings_file=train_path,
+            padding_length=max_sequence_length + 1,
+            ignore_last_n=ignore_last_n,
+            chronological=chronological,
+            sample_ratio=positional_sampling_ratio,
+        )
+        if eval_path is not None:
+            eval_dataset = DatasetV2(
+                ratings_file=eval_path,
+                padding_length=max_sequence_length + 1,
+                ignore_last_n=0,
+                chronological=chronological,
+                sample_ratio=1.0,
+            )
+        else:
+            eval_dataset=None
     else:
         raise ValueError(f"Unknown dataset {dataset_name}")
 
@@ -162,15 +184,33 @@ def get_reco_dataset(
         max_item_id = dp.expected_max_item_id()
         for x in all_item_ids:
             assert x > 0, "x in all_item_ids should be positive"
+    elif dataset_name == "user_diy":
+        items = pd.read_csv(items_path, delimiter=",") 
+        max_jagged_dimension = 16
+        all_item_ids = []
+        max_item_id = 0
+        for df_index, row in items.iterrows():
+            movie_id = int(row["movie_id"])
+            all_item_ids.append(movie_id)
+            if max_item_id < movie_id:
+                max_item_id = movie_id
+        assert max_item_id is not None
+        all_item_ids = list(set(all_item_ids))
+        for x in all_item_ids:
+            assert x > 0, "x in all_item_ids should be positive"
     else:
         # expected_max_item_id and item_features are not set for Amazon datasets.
         item_features = None
         max_item_id = dp.expected_num_unique_items()
         all_item_ids = [x + 1 for x in range(max_item_id)]  # pyre-ignore [6]
 
+    if dataset_name == "user_diy":
+        num_unique_items=len(all_item_ids)
+    else:
+        num_unique_items=dp.expected_num_unique_items()
     return RecoDataset(
         max_sequence_length=max_sequence_length,
-        num_unique_items=dp.expected_num_unique_items(),  # pyre-ignore [6]
+        num_unique_items=num_unique_items,  # pyre-ignore [6]
         max_item_id=max_item_id,  # pyre-ignore [6]
         all_item_ids=all_item_ids,
         train_dataset=train_dataset,

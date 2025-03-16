@@ -21,18 +21,18 @@ import pandas as pd
 # v = cached_v.index_copy_(dim=0, index=delta_x_offsets_0, source=v)
 # print(v)
 
-def truncate_sequences(row):
+def truncate_sequences(row, max_seq_len):
     # 将字符串按逗号分割成列表
     item_ids = row['sequence_item_ids'].split(',')
     ratings = row['sequence_ratings'].split(',')
     timestamps = row['sequence_timestamps'].split(',')
 
-    # 检查列表长度是否大于等于200
-    if len(item_ids) >= 200:
-        # 截取前200个元素
-        item_ids = item_ids[:200]
-        ratings = ratings[:200]
-        timestamps = timestamps[:200]
+    # 检查列表长度是否大于等于max_seq_len
+    if len(item_ids) >= max_seq_len:
+        # 截取前max_seq_len个元素
+        item_ids = item_ids[:max_seq_len]
+        ratings = ratings[:max_seq_len]
+        timestamps = timestamps[:max_seq_len]
 
         # 将处理后的列表重新拼接成字符串
         row['sequence_item_ids'] = ','.join(item_ids)
@@ -41,18 +41,28 @@ def truncate_sequences(row):
 
     return row
 
-def truncate_sequence_data(inputfile, outputfile):
+def truncate_sequence_data(inputfile, max_seq_len):
     file_path = inputfile
+    file_dir, file_name = os.path.split(inputfile)
+    file_base, file_ext = os.path.splitext(file_name)
+    output_file = os.path.join(file_dir, f"{file_base}_max_{max_seq_len}.csv")
     df = pd.read_csv(file_path)
-    df = df.apply(truncate_sequences, axis=1)
+    df = df.apply(truncate_sequences, args=(max_seq_len, ), axis=1)
 
-    df.to_csv(outputfile, index=False)
-    print(f"data truncated by 200 saved at {outputfile}")
+    df.to_csv(output_file, index=False)
+    print(f"data truncated by {max_seq_len} saved at {output_file}")
 
-input_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281.csv'
-output_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200.csv'
+# input_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281.csv'
+# output_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200.csv'
 
 # truncate_sequence_data(input_file, output_file)
+
+test_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test.csv'
+train_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_train.csv'
+# truncate_sequence_data(test_file, 1000)
+# truncate_sequence_data(train_file, 1000)
+# truncate_sequence_data(test_file, 200)
+# truncate_sequence_data(train_file, 200)
 
 
 if False:
@@ -116,8 +126,8 @@ def parse_log_file(log_file_path, output_csv_path):
         # 匹配 `no` 和 `fully` 缓存评估块
         cache_pattern = re.compile(
             r'============== begin evaling use (no|fully) cache\.\.\.==============\n'
-            # r'eval use \w+ cache need avg : ([\d.]+) ms\n'
-            r'eval use \w+ cache need: ([\d.]+) ms\n'
+            r'eval use \w+ cache need avg : ([\d.]+) ms\n'
+            # r'eval use \w+ cache need: ([\d.]+) ms\n'
             r'metrics are: NDCG@10 ([\d.]+), NDCG@50 ([\d.]+), HR@10 ([\d.]+), HR@50 ([\d.]+), MRR ([\d.]+)',
             re.MULTILINE
         )
@@ -140,8 +150,8 @@ def parse_log_file(log_file_path, output_csv_path):
         selective_pattern = re.compile(
             r'============== begin evaling use selective cache\.\.\.==============\n'
             r'!!!recompute_ratio is \d+!!!\n'  # 允许匹配 `recompute_ratio` 这行
-            # r'eval use selective cache need avg : ([\d.]+) ms\n'
-            r'eval use selective cache need: ([\d.]+) ms\n'
+            r'eval use selective cache need avg : ([\d.]+) ms\n'
+            # r'eval use selective cache need: ([\d.]+) ms\n'
             r'metrics are: NDCG@10 ([\d.]+), NDCG@50 ([\d.]+), HR@10 ([\d.]+), HR@50 ([\d.]+), MRR ([\d.]+)',
             re.MULTILINE
         )
@@ -178,6 +188,22 @@ test_3_type_on_gpu_csv_path = '/home/yinj@/datas/grkvc/result_logs/test_15_model
 test_3_type_on_gpu_log_avg_time_path = '/home/yinj@/datas/grkvc/result_logs/test_15_models_3_types_cache_on_gpu_w_avg_time.log'
 test_3_type_on_gpu_csv_avg_time_path = '/home/yinj@/datas/grkvc/result_logs/test_15_models_3_types_cache_on_gpu_w_avg_time.csv'
 # parse_log_file(test_3_type_on_gpu_log_avg_time_path, test_3_type_on_gpu_csv_avg_time_path)
+
+test_3_type_delta_x_avg_gpu_r20_log_path = '/home/yinj@/datas/grkvc/result_logs/see_delta_3_type_15_models_w_r20.log'
+test_3_type_delta_x_avg_gpu_r20_csv_path = '/home/yinj@/datas/grkvc/result_logs/see_delta_3_type_15_models_w_r20.csv'
+# parse_log_file(test_3_type_delta_x_avg_gpu_r20_log_path, test_3_type_delta_x_avg_gpu_r20_csv_path)
+
+test_3_type_delta_x_avg_gpu_r30_log_path = '/home/yinj@/datas/grkvc/result_logs/see_delta_3_type_15_models_w_r30.log'
+test_3_type_delta_x_avg_gpu_r30_csv_path = '/home/yinj@/datas/grkvc/result_logs/see_delta_3_type_15_models_w_r30.csv'
+# parse_log_file(test_3_type_delta_x_avg_gpu_r30_log_path, test_3_type_delta_x_avg_gpu_r30_csv_path)
+
+test_3_type_delta_x_avg_gpu_r50_log_path = '/home/yinj@/datas/grkvc/result_logs/see_delta_3_type_15_models_w_r50.log'
+test_3_type_delta_x_avg_gpu_r50_csv_path = '/home/yinj@/datas/grkvc/result_logs/see_delta_3_type_15_models_w_r50.csv'
+# parse_log_file(test_3_type_delta_x_avg_gpu_r50_log_path, test_3_type_delta_x_avg_gpu_r50_csv_path)
+
+test_3_type_delta_x_avg_gpu_r20_log_path_w_sync_path = '/home/yinj@/datas/grkvc/result_logs/see_delta_3_type_15_models_w_r20_wo_sync.log'
+test_3_type_delta_x_avg_gpu_r20_csv_path_w_sync_path = '/home/yinj@/datas/grkvc/result_logs/see_delta_3_type_15_models_w_r20_wo_sync.csv'
+# parse_log_file(test_3_type_delta_x_avg_gpu_r20_log_path_w_sync_path, test_3_type_delta_x_avg_gpu_r20_csv_path_w_sync_path)
 
 
 def plot_selected_models(csv_path, selected_models, pic_prefix, output_dir=None):
@@ -301,6 +327,10 @@ selected_models = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 # plot_selected_models(csv_path=output_log_csv_path, selected_models=selected_models)
 # plot_selected_models(csv_path=test_3_type_on_gpu_csv_path, selected_models=selected_models, pic_prefix="test_3_type_on_gpu")
 # plot_selected_models(csv_path=test_3_type_on_gpu_csv_avg_time_path, selected_models=selected_models, pic_prefix="test_3_type_on_gpu_csv_avg_time")
+# plot_selected_models(csv_path=test_3_type_delta_x_avg_gpu_r20_csv_path, selected_models=selected_models, pic_prefix="test_3_type_delta_x_avg_gpu_r20")
+# plot_selected_models(csv_path=test_3_type_delta_x_avg_gpu_r30_csv_path, selected_models=selected_models, pic_prefix="test_3_type_delta_x_avg_gpu_r30")
+# plot_selected_models(csv_path=test_3_type_delta_x_avg_gpu_r50_csv_path, selected_models=selected_models, pic_prefix="test_3_type_delta_x_avg_gpu_r50")
+# plot_selected_models(csv_path=test_3_type_delta_x_avg_gpu_r20_csv_path_w_sync_path, selected_models=selected_models, pic_prefix="test_3_type_delta_x_avg_gpu_r20_csv_w_sync")
 
 def plot_model5_comparison(csv_path, model_num, metric, output_dir=None):
     """

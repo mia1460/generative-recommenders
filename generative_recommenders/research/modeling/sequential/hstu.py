@@ -44,7 +44,7 @@ from generative_recommenders.research.modeling.similarity_module import (
 )
 from generative_recommenders.research.rails.similarities.module import SimilarityModule
 
-from generative_recommenders.research.modeling.cache.utils import get_next_layer_padded_kv_recompute_mask, get_padded_fusion_kv
+from generative_recommenders.research.modeling.cache.utils import get_next_layer_padded_kv_recompute_mask, get_padded_fusion_kv, get_recompute_indices
 
 
 TIMESTAMPS_KEY = "timestamps"
@@ -189,7 +189,8 @@ def _hstu_attention_maybe_from_cache(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B: int = x_offsets.size(0) - 1
     n: int = invalid_attn_mask.size(-1)
-    B, m, D = q.shape
+    if use_all_padded:
+        B, m, D = q.shape
     # print(f"m is {m}")
     if delta_x_offsets is not None:
         if use_all_padded:
@@ -236,12 +237,20 @@ def _hstu_attention_maybe_from_cache(
                 values=k, offsets=[x_offsets], max_lengths=[n], padding_value=0.0
             )
 
-    qk_attn = torch.einsum(
-        "bmhd,bnhd->bhmn",
-        # padded_q.view(B, n, num_heads, attention_dim),
-        padded_q.view(B, m, num_heads, attention_dim),
-        padded_k.view(B, n, num_heads, attention_dim),
-    )
+    if use_all_padded:
+        qk_attn = torch.einsum(
+            "bmhd,bnhd->bhmn",
+            # padded_q.view(B, n, num_heads, attention_dim),
+            padded_q.view(B, m, num_heads, attention_dim),
+            padded_k.view(B, n, num_heads, attention_dim),
+        )
+    else:
+        qk_attn = torch.einsum(
+            "bmhd,bnhd->bhmn",
+            # padded_q.view(B, n, num_heads, attention_dim),
+            padded_q.view(B, n, num_heads, attention_dim),
+            padded_k.view(B, n, num_heads, attention_dim),
+        )        
 
     if all_timestamps is not None:
         rab = rel_attn_bias(all_timestamps)
@@ -364,6 +373,8 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
         need_compute_mask: bool = False, # only for whether compute mask
         cached_mask: torch.Tensor = None, # when need_compute_mask == True, this param is need for decide which postion to be included
         r: int = 20, # when need_compute_mask == True, this param is need for decide top r% kv deviation position mask
+        use_delta_x: bool = True, # add for selective compute to decide whether fully compute or not
+        cached_lengths: torch.Tensor = None,
     ):
         """
         Args:
@@ -385,10 +396,6 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
         # print(f"n is {n}, N is {N}")
         cached_q = None
         cached_k = None
-        # if delta_x_offsets is not None and use_all_padded:
-        #     delta_x_mask = delta_x_offsets[0].unsqueeze(-1)
-        #     if recompute_mask is not None:
-        #         delta_x_mask = delta_x_mask | (recompute_mask.unsqueeze(-1))
         if delta_x_offsets is not None:
             # In this case, for all the following code, x, u, v, q, k become restricted to
             # [delta_x_offsets[0], :].
@@ -396,18 +403,13 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
             cached_v, cached_q, cached_k, cached_outputs = cache
             
             if use_all_padded:
-                # x_mask = delta_x_mask
-                # print(f"x_mask[0] is {x_mask[0]}")
-                # x = x * x_mask
-                if n == N:
-                    # print(x[delta_x_offsets[1]].shape)
+                if n == N and use_delta_x:
+                    # print(f"[INFO] split x")
                     batch_indices = torch.arange(B).view(-1, 1)
                     x = x[batch_indices, delta_x_offsets[1]]
                     if False and "use mask for select x":
-                        # print(f"delta_x_offsets[1] is {delta_x_offsets[1]}")
                         x = x[x_mask.squeeze(-1)].contiguous().view(B, -1, D)
                     # print(f"is equal? {indices_x.equal(x)}")
-                # print(f"x.shape is {x.shape}")
             else:
                 x = x[delta_x_offsets[0], :]
 
@@ -449,11 +451,8 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
         else:
             raise ValueError(f"Unknown self._linear_config {self._linear_config}")
 
-        if delta_x_offsets is not None:
+        if delta_x_offsets is not None and use_delta_x:
             if use_all_padded:
-                # fusion_mask = delta_x_mask
-                # indices = torch.where(fusion_mask)[1].view(B, -1)
-                # valid_indices = torch.clamp(indices, 0, N - 1)
                 valid_indices = delta_x_offsets[1]
                 k = cached_k.scatter_(
                     dim=1,
@@ -478,14 +477,30 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
         if need_compute_mask:
             assert delta_x_offsets is not None and use_all_padded
             # print(f"[INFO] compute next layer recompute_mask")
-            recompute_mask = get_next_layer_padded_kv_recompute_mask(
+            # print(f"!!!recompute_ratio is {r}!!!")
+            delta_x_indices, delta_lengths, valid_mask = get_recompute_indices(
                 cached_k=cached_k,
                 cached_v=cached_v,
                 compute_k=k,
                 compute_v=v,
-                cached_mask=cached_mask,
+                valid_mask=cached_mask,
+                cached_lengths=cached_lengths,
+                past_lengths=x_offsets,
+                delta_x_indices=delta_x_offsets[1],
+                delta_lengths=delta_x_offsets[0],
+                use_percentage=True,
                 r=r,
             )
+            # print(f"after get_recompute_indices: the delta_lengths is {delta_lengths}")
+            if False and " use padded and not delta ":
+                recompute_mask = get_next_layer_padded_kv_recompute_mask(
+                    cached_k=cached_k,
+                    cached_v=cached_v,
+                    compute_k=k,
+                    compute_v=v,
+                    cached_mask=cached_mask,
+                    r=r,
+                )
             # print(f"recompute_mask[0] is {recompute_mask[0]}")
 
 
@@ -505,7 +520,7 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
                 v=v,
                 cached_q=cached_q,
                 cached_k=cached_k,
-                delta_x_offsets=delta_x_offsets,
+                delta_x_offsets=delta_x_offsets if use_delta_x else None,
                 x_offsets=x_offsets,
                 all_timestamps=all_timestamps,
                 invalid_attn_mask=invalid_attn_mask,
@@ -580,18 +595,12 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
                 if delta_x_offsets is None
                 else attn_output[delta_x_offsets[0], :]
             )
-
-        # print(f"_concat_ua is {self._concat_ua}")
-        if self._concat_ua:
+        if self._concat_ua: # False
             a = self._norm_attn_output(attn_output)
             o_input = torch.cat([u, a, u * a], dim=-1)
         else:
             o_input = u * self._norm_attn_output(attn_output)
 
-        # if delta_x_offsets is not None:
-        #     print(f"o_input is {o_input[0, :, :]}")
-        # else:
-        #     print(f"o_input is {o_input[0, 44:49, :]}")
         new_outputs = (
             self._o(
                 F.dropout(
@@ -602,11 +611,6 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
             )
             + x
         )
-        # if delta_x_offsets is not None:
-        #     print(f"new_outputs is {new_outputs[0, :, :]}")
-        # else:
-        #     print(f"new_outputs is {new_outputs[0, 44:49, :]}")
-        # print(f"after add_x, new_outputs[0] vs new_outputs[1]: {new_outputs[0].equal(new_outputs[1])}, same part {new_outputs[0, 44:49].equal(new_outputs[1, 44:49])}")
 
         if delta_x_offsets is not None:
             if use_all_padded:
@@ -615,14 +619,12 @@ class SequentialTransductionUnitJagged(torch.nn.Module):
                 new_outputs = cached_outputs.index_copy_(
                     dim=0, index=delta_x_offsets[0], source=new_outputs
                 )
-        # print(f"after where, new_outputs[0] vs new_outputs[1]: {new_outputs[0, :49].equal(new_outputs[1, :49])}, same part {new_outputs[0, 44:49].equal(new_outputs[1, 44:49])}")
 
         if return_cache_states and delta_x_offsets is None:
             v = v.contiguous()
-        # print(f"new_outputs is {new_outputs.shape}, v is {v.shape}, padded_q is {padded_q.shape}, padded_k is {padded_k.shape}")
 
         if need_compute_mask:
-            return new_outputs, (v, padded_q, padded_k, new_outputs), recompute_mask
+            return new_outputs, (v, padded_q, padded_k, new_outputs), delta_x_indices, delta_lengths, valid_mask
         else:
             return new_outputs, (v, padded_q, padded_k, new_outputs)
 
@@ -666,7 +668,14 @@ class HSTUJagged(torch.nn.Module):
         """
         cache_states: List[HSTUCacheState] = []
         recompute_mask = None
-        flag = use_all_padded and delta_x_offsets is not None and cached_mask is not None
+        cached_lengths = None
+        selective_reuse_flag = use_all_padded and delta_x_offsets is not None and cached_mask is not None
+        if selective_reuse_flag:
+            cached_lengths = torch.sum(cached_mask, dim=1)
+            delta_x_indices = None
+            delta_lengths = None
+            valid_mask = None
+            need_compute_mask = False
 
         with torch.autocast(
             "cuda",
@@ -675,24 +684,27 @@ class HSTUJagged(torch.nn.Module):
         ):
             for i, layer in enumerate(self._attention_layers):
                 # print(f"================== layer {i} ====================")
-                if flag and i == 0:
+                if selective_reuse_flag and i == 0:
                     # print(f"selective use cache and the first layer")
-                    # recompute_mask = cached_mask | delta_x_offsets[0]
+                    use_delta_x = False
                     need_compute_mask = True
                     cached_mask = cached_mask
+                    cached_lengths = cached_lengths
                     r = r
-                elif flag:
-                    recompute_mask = recompute_mask
+                elif selective_reuse_flag:
+                    use_delta_x = True
                     need_compute_mask = False
                     cached_mask = None
                     r = None
                 else:
+                    use_delta_x = True # for fully reuse
                     recompute_mask = None
                     need_compute_mask = False
                     cached_mask = None
                     r = None
+                # print(f"delta_x_offsets is {delta_x_offsets[0]}")
                 if need_compute_mask:
-                    x, cache_states_i, recompute_mask = layer(
+                    x, cache_states_i, delta_x_indices, delta_lengths, valid_mask = layer(
                         x=x,
                         x_offsets=x_offsets,
                         all_timestamps=all_timestamps,
@@ -705,6 +717,8 @@ class HSTUJagged(torch.nn.Module):
                         need_compute_mask=need_compute_mask,
                         cached_mask=cached_mask,
                         r=r,
+                        use_delta_x=use_delta_x,
+                        cached_lengths=cached_lengths,
                     )                
                 else:
                     x, cache_states_i = layer(
@@ -719,13 +733,25 @@ class HSTUJagged(torch.nn.Module):
                         recompute_mask=recompute_mask,
                         need_compute_mask=need_compute_mask,
                         cached_mask=cached_mask,
-                        r=r,                        
+                        r=r,                    
+                        use_delta_x=use_delta_x,
+                        cached_lengths=cached_lengths,    
                     )
+                if need_compute_mask:
+                    # print(f"[INFO] change the delta_x_offsets")
+                    # print(f"before: the delta_x_offsets is {delta_x_offsets[1][0]}")
+                    delta_x_offsets = (delta_lengths, delta_x_indices)
+                    # print(f"after: the delta_x_offsets is {delta_x_offsets[1][0]}\ndelta_lengths is {delta_x_offsets[0]}")
+                    # cached_mask = valid_mask
                 if return_cache_states:
                     cache_states.append(cache_states_i)
-                torch.cuda.synchronize()
+                # torch.cuda.synchronize()
+        # print(f"at the end of jagged_forward, delta_x_offsets[0] is {delta_x_offsets[0]}")
 
-        return x, cache_states
+        if selective_reuse_flag:
+            return x, cache_states, delta_x_offsets[0]
+        else:
+            return x, cache_states
 
     def forward(
         self,
@@ -756,18 +782,32 @@ class HSTUJagged(torch.nn.Module):
         
 
         if use_all_padded:
-            y, cache_states = self.jagged_forward(
-                x=x,
-                x_offsets=x_offsets,
-                all_timestamps=all_timestamps,
-                invalid_attn_mask=invalid_attn_mask,
-                delta_x_offsets=delta_x_offsets,
-                cache=cache,
-                return_cache_states=return_cache_states,
-                use_all_padded=use_all_padded,     
-                cached_mask=cached_mask,
-                r=r,           
-            )
+            if cached_mask is not None:
+                y, cache_states, delta_lengths = self.jagged_forward(
+                    x=x,
+                    x_offsets=x_offsets,
+                    all_timestamps=all_timestamps,
+                    invalid_attn_mask=invalid_attn_mask,
+                    delta_x_offsets=delta_x_offsets,
+                    cache=cache,
+                    return_cache_states=return_cache_states,
+                    use_all_padded=use_all_padded,     
+                    cached_mask=cached_mask,
+                    r=r,           
+                )
+            else:
+                y, cache_states = self.jagged_forward(
+                    x=x,
+                    x_offsets=x_offsets,
+                    all_timestamps=all_timestamps,
+                    invalid_attn_mask=invalid_attn_mask,
+                    delta_x_offsets=delta_x_offsets,
+                    cache=cache,
+                    return_cache_states=return_cache_states,
+                    use_all_padded=use_all_padded,     
+                    cached_mask=cached_mask,
+                    r=r,           
+                )
         else:
             jagged_x, cache_states = self.jagged_forward(
                 x=x,
@@ -787,7 +827,12 @@ class HSTUJagged(torch.nn.Module):
                 max_lengths=[invalid_attn_mask.size(1)],
                 padding_value=0.0,
             )
-        return y, cache_states
+        # print(f"in HSTUJagged.forward, the delta_x_offsets[0] is {delta_x_offsets[0]}")
+
+        if use_all_padded and cached_mask is not None:
+            return y, cache_states, delta_lengths
+        else:
+            return y, cache_states
 
 
 class HSTU(SequentialEncoderWithLearnedSimilarityModule):
@@ -946,28 +991,53 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
         )
         # print(f"user_embeddings before _hstu is {user_embeddings.shape}") # [128, 211, 256]
         # print(f"user_embeddings is equal? {user_embeddings[0, 44:49].equal(user_embeddings[1, :5])}")
+        if use_all_padded:
+            x_offsets = past_lengths
+        else:
+            x_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(past_lengths)
 
         float_dtype = user_embeddings.dtype
-        user_embeddings, cached_states = self._hstu(
-            x=user_embeddings,
-            x_offsets=torch.ops.fbgemm.asynchronous_complete_cumsum(past_lengths),
-            all_timestamps=(
-                past_payloads[TIMESTAMPS_KEY]
-                if TIMESTAMPS_KEY in past_payloads
-                else None
-            ),
-            invalid_attn_mask=1.0 - self._attn_mask.to(float_dtype),
-            delta_x_offsets=delta_x_offsets,
-            cache=cache,
-            return_cache_states=return_cache_states,
-            use_all_padded=use_all_padded,
-            cached_mask=cached_mask,
-            r=r,
-        )
+        if cached_mask is not None:
+            user_embeddings, cached_states, delta_lengths = self._hstu(
+                x=user_embeddings,
+                x_offsets=x_offsets,
+                all_timestamps=(
+                    past_payloads[TIMESTAMPS_KEY]
+                    if TIMESTAMPS_KEY in past_payloads
+                    else None
+                ),
+                invalid_attn_mask=1.0 - self._attn_mask.to(float_dtype),
+                delta_x_offsets=delta_x_offsets,
+                cache=cache,
+                return_cache_states=return_cache_states,
+                use_all_padded=use_all_padded,
+                cached_mask=cached_mask,
+                r=r,
+            )  
+        else:          
+            user_embeddings, cached_states = self._hstu(
+                x=user_embeddings,
+                x_offsets=x_offsets,
+                all_timestamps=(
+                    past_payloads[TIMESTAMPS_KEY]
+                    if TIMESTAMPS_KEY in past_payloads
+                    else None
+                ),
+                invalid_attn_mask=1.0 - self._attn_mask.to(float_dtype),
+                delta_x_offsets=delta_x_offsets,
+                cache=cache,
+                return_cache_states=return_cache_states,
+                use_all_padded=use_all_padded,
+                cached_mask=cached_mask,
+                r=r,
+            )
         # print(f"user_embeddings.shape is {user_embeddings.shape}")
         # print(f"user_embeddings after _hstu is {user_embeddings.shape}") # [128, 211, 256]
         # print(f"user_embeddings is equal? {user_embeddings[0, 44:49].equal(user_embeddings[1, :5])}")
-        return self._output_postproc(user_embeddings), cached_states
+        if cached_mask is not None:
+            return self._output_postproc(user_embeddings), cached_states, delta_lengths
+        else:
+            return self._output_postproc(user_embeddings), cached_states
 
     def forward(
         self,
@@ -1024,25 +1094,44 @@ class HSTU(SequentialEncoderWithLearnedSimilarityModule):
         Returns:
             (B, D) x float, representing embeddings for the current state.
         """
-        encoded_seq_embeddings, cache_states = self.generate_user_embeddings(
-            past_lengths=past_lengths,
-            past_ids=past_ids,
-            past_embeddings=past_embeddings,
-            past_payloads=past_payloads,
-            delta_x_offsets=delta_x_offsets,
-            cache=cache,
-            return_cache_states=return_cache_states,
-            use_all_padded=use_all_padded,
-            cached_mask=cached_mask,
-            r=r,
-        )  # [B, N, D]
+        if cached_mask is not None:
+            encoded_seq_embeddings, cache_states, delta_lengths = self.generate_user_embeddings(
+                past_lengths=past_lengths,
+                past_ids=past_ids,
+                past_embeddings=past_embeddings,
+                past_payloads=past_payloads,
+                delta_x_offsets=delta_x_offsets,
+                cache=cache,
+                return_cache_states=return_cache_states,
+                use_all_padded=use_all_padded,
+                cached_mask=cached_mask,
+                r=r,
+            )  # [B, N, D]
+        else:
+            encoded_seq_embeddings, cache_states = self.generate_user_embeddings(
+                past_lengths=past_lengths,
+                past_ids=past_ids,
+                past_embeddings=past_embeddings,
+                past_payloads=past_payloads,
+                delta_x_offsets=delta_x_offsets,
+                cache=cache,
+                return_cache_states=return_cache_states,
+                use_all_padded=use_all_padded,
+                cached_mask=cached_mask,
+                r=r,
+            )  # [B, N, D]
         if use_all_padded and delta_x_offsets is not None:
             # delta_lengths = torch.full(size=(encoded_seq_embeddings.shape[0],), fill_value=encoded_seq_embeddings.shape[1], dtype=torch.int32 , device=encoded_seq_embeddings.device)
             # delta_lengths = past_lengths
             # delta_lengths[0] = encoded_seq_embeddings.shape[1]
-            # print(f"delta_lengths is {delta_lengths}")
+            if cached_mask is not None:
+                delta_lengths = delta_lengths
+                # print(f"delta_lengths.max is {torch.max(delta_lengths)}")
+            else:
+                delta_lengths = delta_x_offsets[0]
+            # print(f"delta_lenths is {delta_lengths}")
             current_embeddings = get_current_embeddings(
-                lengths=delta_x_offsets[0], encoded_embeddings=encoded_seq_embeddings
+                lengths=delta_lengths, encoded_embeddings=encoded_seq_embeddings
             )
         else:
             current_embeddings = get_current_embeddings(

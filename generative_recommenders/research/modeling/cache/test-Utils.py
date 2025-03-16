@@ -4,8 +4,7 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '/home/yinj@/workplace/generative-recommenders'))
 
-
-from utils import get_next_layer_padded_kv_recompute_mask
+from utils import get_recompute_indices
 import torch
 
 cached_k = torch.randn(3, 4, 5)
@@ -13,17 +12,40 @@ cached_v = torch.randn(3, 4, 5)
 compute_k = torch.randn(3, 4, 5)
 compute_v = torch.randn(3, 4, 5)
 
-cached_mask = torch.tensor([
+valid_mask = torch.tensor([
     [True, True, False, False],
-    [True, False, False, False],
+    [True, True, False, False],
     [True, True, True, False],
-], dtype=torch.bool)
+])
 
-r = 50
+cached_lengths = torch.tensor([2, 2, 3])
+past_lengths = torch.tensor([3, 4, 4])
 
-recompute_mask = get_next_layer_padded_kv_recompute_mask(cached_k, cached_v, compute_k, compute_v, cached_mask, r)
+recompute_indices, lengths, mask = get_recompute_indices(cached_k, cached_v, compute_k, compute_v, valid_mask, cached_lengths, past_lengths, use_percentage=True, r=50)
 
-print(f"recompute_mask is {recompute_mask}")
+print(f"recompute_indices is {recompute_indices}\nvalid lengths is {lengths}\nmask is {mask}")
+
+
+if False:
+    from utils import get_next_layer_padded_kv_recompute_mask
+    import torch
+
+    cached_k = torch.randn(3, 4, 5)
+    cached_v = torch.randn(3, 4, 5)
+    compute_k = torch.randn(3, 4, 5)
+    compute_v = torch.randn(3, 4, 5)
+
+    cached_mask = torch.tensor([
+        [True, True, False, False],
+        [True, False, False, False],
+        [True, True, True, False],
+    ], dtype=torch.bool)
+
+    r = 50
+
+    recompute_mask = get_next_layer_padded_kv_recompute_mask(cached_k, cached_v, compute_k, compute_v, cached_mask, r)
+
+    print(f"recompute_mask is {recompute_mask}")
 
 if False:
     from utils import get_padded_fusion_kv

@@ -105,7 +105,8 @@ def get_base_cache_and_lengths(
     model,
     eval_batch_size,
     main_module_bf16,
-    world_size
+    world_size,
+    use_gpu=False,
 ):
     start_time = time.time()
     print(f"begin saving base cache list and cached lengths list...")
@@ -141,7 +142,10 @@ def get_base_cache_and_lengths(
         # print(f"cached_k.shape is {cached_k[0].shape}, cached_v.shape is {cached_v[0].shape}, new_output.shape is {new_output[0].shape}, cached_q.shape is {cached_q[0].shape}") 
         # base_cache_list.append([(cached_v[i].cpu(), cached_q[i].cpu(), cached_k[i].cpu(), new_output[i].cpu()) for i in range(model._num_blocks)])
         # cached_lengths_list.append(seq_features.past_lengths.cpu())
-        base_cache_list.append([(cached_v[i], None, cached_k[i], None) for i in range(model._num_blocks)])
+        if use_gpu:
+            base_cache_list.append([(cached_v[i], None, cached_k[i], None) for i in range(model._num_blocks)])
+        else:
+            base_cache_list.append([(cached_v[i].cpu(), None, cached_k[i].cpu(), None) for i in range(model._num_blocks)])
         cached_lengths_list.append(seq_features.past_lengths)
         if eval_dict_all is None:
             eval_dict_all = {}
@@ -169,6 +173,7 @@ def save_base_cache_and_lengths(
     world_size,
     base_cache_path,
     cached_lengths_path,
+    use_gpu = False,
 ):
     base_cache_list, cached_lengths_list = get_base_cache_and_lengths(
         data_loader=data_loader,
@@ -178,7 +183,8 @@ def save_base_cache_and_lengths(
         model=model,
         eval_batch_size=eval_batch_size,
         main_module_bf16=main_module_bf16,
-        world_size=world_size
+        world_size=world_size,
+        use_gpu=use_gpu,
     )
     torch.save(base_cache_list, base_cache_path)
     torch.save(cached_lengths_list, cached_lengths_path)
@@ -406,6 +412,7 @@ def run_an_e2e(
                         max_sequence_length=N,
                         device=device,
                     )
+                    # print(f"cached_mask is {cached_mask}")
                 # torch.cuda.synchronize()
 
             if return_cache_states:

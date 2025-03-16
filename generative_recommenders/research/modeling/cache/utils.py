@@ -173,26 +173,123 @@ def get_recompute_indices(
     compute_k: torch.Tensor, # [B, N, D]
     compute_v: torch.Tensor, # [B, N, D]
     valid_mask: torch.Tensor, # [B, N]
+    cached_lengths: torch.Tensor, # [B]
+    past_lengths: torch.Tensor, # [B]
+    delta_x_indices: torch.Tensor = None, # if valid_mask is all False
+    delta_lengths: torch.Tensor = None, # if valid_mask is all False
     use_percentage: bool = False, 
     r: int = 10, # if use_percentage == True, choose top r%, else choose top r
 ):
+    if torch.any(valid_mask, dim=1).any():
+        pass
+    else:
+        return delta_x_indices, delta_lengths, valid_mask
 
     diff_k = (cached_k - compute_k).abs().sum(dim=-1)
     diff_v = (cached_v - compute_v).abs().sum(dim=-1)
     diff_total =  diff_k + diff_v
 
-    valid_diff = torch.where(valid_mask, diff_total, -torch.inf)    
+    valid_diff = torch.where(valid_mask, diff_total, -torch.inf)
+    # print(f"valid_diff is {valid_diff}")
+    valid_lengths = torch.sum(valid_mask, dim=1)
 
-    cached_total = valid_mask.sum().float()
-    if use_percentage:
-        k = int(cached_total * r / 100)
-    else:
-        k = r
+    batch_size = valid_diff.size(0)
+    device = valid_diff.device
+    combined_indices_list = []
+    final_valid_lengths = []
+    valid_topk_mask_list = []
+    
+    for i in range(batch_size):
+        # Step 1: Compute topk indices for recompute
+        n_valid_i = valid_lengths[i].item()
+        if use_percentage:
+            k_i = max(1, round(n_valid_i * r / 100))
+        else:
+            k_i = r
+        k_actual_i = min(k_i, n_valid_i)
+        
+        sample_valid_diff = valid_diff[i]
+        if k_actual_i > 0:
+            _, topk_indices = torch.topk(sample_valid_diff, k_actual_i)
+            topk_indices = torch.sort(topk_indices)[0]
+        else:
+            topk_indices = torch.tensor([], dtype=torch.long, device=device)
+        
+        # Step 2: Compute new indices from cached_lengths and past_lengths
+        past_len = past_lengths[i].item()
+        cached_len = cached_lengths[i].item()
+        if cached_len < past_len:
+            new_indices = torch.arange(cached_len, past_len, device=device, dtype=torch.long)  # [new_entries]
+        else:
+            new_indices = torch.tensor([], dtype=torch.long, device=device)  # No new indices if no entries
+        
+        # Combine indices and collect
+        combined = torch.cat([topk_indices, new_indices])
+        combined_indices_list.append(combined)
 
-    flat_diff = valid_diff.flatten()
-    _, flat_indices = torch.topk(flat_diff, k=k, largest=True, sorted=False)
-    # print(f"flat_indices is {flat_indices}")
+        final_valid_lengths.append(combined.size(0))
 
-    recompute_mask = torch.zeros_like(valid_mask, dtype=torch.bool)
-    recompute_mask.view(-1)[flat_indices] = True
+        valid_topk_mask = torch.zeros(valid_mask.size(1), dtype=torch.bool, device=device)
+        valid_topk_mask[topk_indices] = 1  # 直接标记combined中的索引为True
+        valid_topk_mask_list.append(valid_topk_mask)
+    
+    # Step 3: Padding to form [B, m] tensor
+    max_len = max(len(indices) for indices in combined_indices_list)
+    padded_indices = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
+    for i, indices in enumerate(combined_indices_list):
+        if len(indices) > 0:
+            padded_indices[i, :len(indices)] = indices    
+
+    final_valid_topk_mask = torch.zeros((batch_size, valid_mask.size(1)), dtype=torch.bool, device=device)
+    for i, mask in enumerate(valid_topk_mask_list):
+        final_valid_topk_mask[i, :len(mask)] = mask
+
+
+    if False and "use GPT stlye":
+        if use_percentage:
+            k = torch.floor(r / 100 * valid_mask.sum(dim=1)).long()
+        else:
+            k = r
+
+        top_k_indices = []
+        added_indices = []
+        max_len = 0
+        for b in range(cached_k.shape[0]):
+            user_valid_diff = valid_diff[b]
+            user_valid_mask = valid_mask[b]
+
+            valid_indices = torch.nonzero(user_valid_mask).squeeze()
+            valid_diff_values = user_valid_diff[valid_indices]
+
+            if valid_indices.size(0) > k[b]:
+                _, top_k = torch.topk(valid_diff_values, k, largest=True)
+                top_k_indices.append(valid_indices[top_k])
+            else:
+                top_k_indices.append(valid_indices)
+
+            start_idx = past_lenths[b]
+            end_idx = cached_lengths[b]
+            added_indices.append(torch.arange(start_idx, end_idx))
+
+            merged_indices = torch.cat(top_k_indices[b], added_indices[b])
+            max_len = max(max_len, merged_indices.size(0))
+
+        final_indices = []
+        for b in range(cached_k.shape[0]):
+            merged_indices = torch.cat(top_k_indices[b], added_indices[b])
+            padded_indices = torch.cat(
+                (merged_indices, torch.zeros(max_len - merged_indices.size(0), dtype=torch.long))
+            )
+            final_indices.append(padded_indices)
+
+        final_indices_tensor = torch.stack(final_indices)
+        return final_indices_tensor
+
+    return padded_indices, torch.tensor(final_valid_lengths, dtype=torch.int32, device=device), final_valid_topk_mask
+
+    
+
+        
+
+
     
