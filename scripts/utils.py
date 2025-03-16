@@ -370,8 +370,8 @@ def run_an_e2e(
             if use_all_padded and base_cache_list is not None and cached_lengths_list is not None:
                 B, N = seq_features.past_ids.shape
                 row_idx = torch.arange(N, device=device).unsqueeze(0)
-                # cached = cached_lengths_list[eval_iter].to(device).view(B, 1)
-                cached = cached_lengths_list[eval_iter].view(B, 1)
+                cached = cached_lengths_list[eval_iter].to(device).view(B, 1)
+                # cached = cached_lengths_list[eval_iter].view(B, 1)
                 past = seq_features.past_lengths.view(B, 1)
                 mask = (row_idx >= cached) & (row_idx < past) # [128, 211]
                 # mask_0 = mask[0]
@@ -401,10 +401,10 @@ def run_an_e2e(
 
                 delta_x_offsets = (delta_lengths, target_indices)
                 base_cache = base_cache_list[eval_iter]
-                # base_cache = [
-                #     tuple(tensor.to(device, non_blocking=False) if tensor is not None else None for tensor in layer)
-                #     for layer in base_cache
-                # ]
+                base_cache = [
+                    tuple(tensor.to(device, non_blocking=False) if tensor is not None else None for tensor in layer)
+                    for layer in base_cache
+                ]
                 if cache_use_type == "selective":
                     cached_mask = get_cached_mask(
                         # cached_lengths=cached_lengths_list[eval_iter].to(device),

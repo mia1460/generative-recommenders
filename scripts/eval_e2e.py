@@ -119,7 +119,7 @@ USE_CKPT_FILE = True
 RECOMPUTE_RATIO=20
 
 # for save base_cache_list and cached_lengths_list
-NEED_SAVE_BC = False
+NEED_SAVE_BC = True
 
 # [eval_body]
 # load config
@@ -131,7 +131,7 @@ gin.parse_config(filtered_config)
 # eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test.csv'
 
 eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_max_100.csv'
-eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_max_60.csv'
+eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_max_110.csv'
 eval_random_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200_loss_last_random_1_to_no_5.csv'
 eval_latest_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200.csv'
 eval_base_dataset = DatasetV2(
@@ -343,7 +343,7 @@ if True and "when use data of about 1w+ users":
 if NEED_SAVE_BC:
     save_base_cache_and_lengths(data_loader=eval_base_loader, device=device, gr_output_length=gr_output_length, eval_state=eval_state, model=model, eval_batch_size=local_batch_size, main_module_bf16=main_module_bf16, world_size=world_size, base_cache_path=base_cache_path, cached_lengths_path=cached_lengths_path, use_gpu=use_gpu_flag)
 
-if False and "load base cache":
+if True and "load base cache":
     base_cache_list = torch.load(base_cache_path)
     cached_lengths_list = torch.load(cached_lengths_path)
 # print(f"base_cache_list[0].len is {len(base_cache_list[0])}")
@@ -351,7 +351,7 @@ if False and "load base cache":
 # print(f"base_cache_list[0][0][0].shape is {base_cache_list[0][0][0]}, cached_lengths_list[0] is {cached_lengths_list[0]}")
 # print(f"the first user's cached length is {cached_lengths_list[0][0]}") # 43
 # print(f"base_cache: the first user's cached_k is {base_cache_list[0][:][2][:cached_lengths_list[0][0]].shape}\ncached_v is {base_cache_list[0][:][0][:cached_lengths_list[0][0]].shape}")
-if True:
+if False:
     run_an_e2e(
         cache_use_type = "no",
         # data_loader=eval_delta_loader,
@@ -449,4 +449,22 @@ if True:
             return_encoded_embeddings=False,
             # enable_profiler=True,
         )    
+        run_an_e2e(
+            cache_use_type = "fully",
+            data_loader=eval_delta_loader,
+            # data_loader=eval_base_loader,
+            device=device,
+            gr_output_length=gr_output_length,
+            eval_state=eval_state,
+            model=model,
+            eval_batch_size=local_batch_size,
+            main_module_bf16=main_module_bf16,
+            world_size=world_size,
+            return_cache_states=False,
+            use_all_padded=True,
+            base_cache_list=base_cache_list,
+            cached_lengths_list=cached_lengths_list,
+            return_encoded_embeddings=False,
+            # enable_profiler=True,
+        )
         # run_3_type(eval_delta_loader, device, gr_output_length, eval_state, model, local_batch_size, main_module_bf16, world_size, enable_profiler=False, base_cache_list=base_cache_list, cached_lengths_list=cached_lengths_list, r=20)
