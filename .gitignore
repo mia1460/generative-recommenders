@@ -2,12 +2,6 @@
 tmp/
 exps/
 ckpts/
-# generative_recommenders/dlrm_v3/data/KuaiRand-1K/data/video_features_statistic_1k.csv
-# generative_recommenders/dlrm_v3/data/KuaiRand-1K/data/log_standard_4_08_to_4_21_1k.csv
-# generative_recommenders/dlrm_v3/data/KuaiRand-1K/data/log_standard_4_22_to_5_08_1k.csv
-# generative_recommenders/dlrm_v3/data/KuaiRand-1K/data/processed_seqs.csv
-# generative_recommenders/dlrm_v3/data/KuaiRand-1K/data/video_features_basic_1k.csv
-
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

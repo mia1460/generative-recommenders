@@ -2,7 +2,6 @@
 import torch
 from typing import Tuple
 import time
-
 from generative_recommenders.research.modeling.cache.timer import (
     CUDATimer,
 )

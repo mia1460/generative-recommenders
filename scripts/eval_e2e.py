@@ -119,7 +119,7 @@ USE_CKPT_FILE = True
 RECOMPUTE_RATIO=20
 
 # for save base_cache_list and cached_lengths_list
-NEED_SAVE_BC = True
+NEED_SAVE_BC = False
 
 # [eval_body]
 # load config
