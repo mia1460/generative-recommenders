@@ -3,6 +3,7 @@ import torch
 from collections import OrderedDict
 import time
 import datetime
+import gzip
 from generative_recommenders.research.data.eval import (
     _avg,
     add_to_summary_writer,
@@ -190,6 +191,84 @@ def save_base_cache_and_lengths(
     torch.save(cached_lengths_list, cached_lengths_path)
     print(f"base_cache_list saved at {base_cache_path}, cached_lengths_list saved at {cached_lengths_path}")
 
+def save_batch_base_cache_and_lengths(
+    data_loader,
+    device,
+    gr_output_length,
+    eval_state,
+    model,
+    eval_batch_size,
+    main_module_bf16,
+    world_size,
+    base_cache_dir,
+    base_lengths_dir,
+    data_prefix,
+    use_gpu=False,
+):
+    start_time = time.time()
+    cache_dir = os.path.join(base_cache_dir, data_prefix)
+    lengths_dir = os.path.join(base_cache_dir, data_prefix)
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    if not os.path.exists(lengths_dir):
+        os.makedirs(lengths_dir)
+    print(f"begin saving batch base cache in {cache_dir}, batch base lengths in {lengths_dir}...")
+
+    eval_dict_all = None
+    for eval_iter, row in enumerate(iter(data_loader)):
+        print(f"-saving the batch-{eval_iter}'s cache and past_lengths...")
+        seq_features, target_ids, target_ratings = movielens_seq_features_from_row(
+            row, device=device, max_output_length=gr_output_length + 1
+        )
+        eval_dict, updated_cache = eval_metrics_v2_from_tensors(
+            eval_state,
+            model,
+            seq_features,
+            target_ids=target_ids,
+            target_ratings=target_ratings,
+            user_max_batch_size=eval_batch_size,
+            dtype=torch.bfloat16 if main_module_bf16 else None,
+            cache=None,
+            return_cache_states=True,
+            use_all_padded=True,
+            # selective_reuse=False,
+        )  
+        cached_k = [cached_ks[2] for cached_ks in updated_cache]
+        cached_v = [cached_vs[0] for cached_vs in updated_cache] 
+
+        if use_gpu:
+            cache_data = [(cached_v[i], None, cached_k[i], None) for i in range(model._num_blocks)]
+            lengths_data = seq_features.past_lengths
+            batch_cache_path = os.path.join(cache_dir, f'batch_{eval_iter}_cache_on_gpu.pt')
+            batch_lengths_path = os.path.join(lengths_dir, f'batch_{eval_iter}_lengths_on_gpu.pt')
+        else:
+            cache_data = [(cached_v[i].cpu(), None, cached_k[i].cpu(), None) for i in range(model._num_blocks)]
+            lengths_data = seq_features.past_lengths.cpu()
+            batch_cache_path = os.path.join(cache_dir, f'batch_{eval_iter}_cache_on_cpu.pt')
+            batch_lengths_path = os.path.join(lengths_dir, f'batch_{eval_iter}_lengths_on_cpu.pt')        
+
+        torch.save(cache_data, batch_cache_path)
+        torch.save(lengths_data, batch_lengths_path)
+
+        # print(f"-cache saved at: {batch_cache_path}\n-lengths saved at: {batch_lengths_path}")
+
+        if eval_dict_all is None:
+            eval_dict_all = {}
+            for k, v in eval_dict.items():
+                eval_dict_all[k] = []
+        for k, v in eval_dict.items():
+            eval_dict_all[k] = eval_dict_all[k] + [v]
+        del eval_dict
+        # if eval_iter == 5:
+        #     break
+    end_time = time.time()
+    print(f"saved base cache list and cached lengths list need: {end_time - start_time:.2f}s")
+    print_eval_metrics(
+        eval_dict=eval_dict_all,
+        world_size=world_size,
+    )
+    return cache_dir, lengths_dir
+
 def run_an_e2e(
     cache_use_type: str, # ["no", "fully", "selective"]
     data_loader,
@@ -207,6 +286,8 @@ def run_an_e2e(
     use_all_padded: bool = True,
     return_encoded_embeddings: bool = False,
     r: int = 20, 
+    use_cache_dir_path = True,
+    use_gpu_cache = False,
 ):
     if return_encoded_embeddings:
         encoded_embeddings_all = []
@@ -367,53 +448,87 @@ def run_an_e2e(
             seq_features, target_ids, target_ratings = movielens_seq_features_from_row(
                 row, device=device, max_output_length=gr_output_length + 1
             )
+            # begin_time = time.time()
             if use_all_padded and base_cache_list is not None and cached_lengths_list is not None:
-                B, N = seq_features.past_ids.shape
-                row_idx = torch.arange(N, device=device).unsqueeze(0)
-                cached = cached_lengths_list[eval_iter].to(device).view(B, 1)
-                # cached = cached_lengths_list[eval_iter].view(B, 1)
-                past = seq_features.past_lengths.view(B, 1)
-                mask = (row_idx >= cached) & (row_idx < past) # [128, 211]
-                # mask_0 = mask[0]
-                delta_lengths = seq_features.past_lengths - cached_lengths_list[eval_iter]
-                delta_max = torch.max(delta_lengths)
-                # print(f"delta_lengths is {delta_lengths}")
+                if use_cache_dir_path:
+                    B, N = seq_features.past_ids.shape
+                    row_idx = torch.arange(N, device=device).unsqueeze(0)
+                    if use_gpu_cache:
+                        cur_lengths_path = os.path.join(cached_lengths_list, f'batch_{eval_iter}_lengths_on_gpu.pt')
+                        cur_cache_path = os.path.join(cached_lengths_list, f'batch_{eval_iter}_cache_on_gpu.pt')
+                        cur_lengths = torch.load(cur_lengths_path)
+                        cur_cache = torch.load(cur_cache_path)
+                    else:
+                        cur_lengths_path = os.path.join(cached_lengths_list, f'batch_{eval_iter}_lengths_on_cpu.pt')
+                        cur_cache_path = os.path.join(cached_lengths_list, f'batch_{eval_iter}_cache_on_cpu.pt')
+                        cur_lengths = torch.load(cur_lengths_path, map_location=device)
+                        cur_cache = torch.load(cur_cache_path, map_location=device)
+                    cached = cur_lengths.view(B, 1)
+                    past = seq_features.past_lengths.view(B, 1)
+                    mask = (row_idx >= cached) & (row_idx < past) # [128, 211]
+                    delta_lengths = seq_features.past_lengths - cur_lengths
+                    delta_max = torch.max(delta_lengths)
+                    indices = [torch.arange(c, p) for c, p in zip(cur_lengths, seq_features.past_lengths)]
+                    target_indices = torch.full((B, delta_max), 0, device=device)
 
-                indices = [torch.arange(c, p) for c, p in zip(cached_lengths_list[eval_iter], seq_features.past_lengths)]
-                target_indices = torch.full((B, delta_max), 0, device=device)
+                    for i, idx in enumerate(indices):
+                        target_indices[i, :len(idx)] = idx
 
-                for i, idx in enumerate(indices):
-                    target_indices[i, :len(idx)] = idx
+                    delta_x_offsets = (delta_lengths, target_indices)
+                    # print(f"delta_lengths is {delta_lengths}")
 
-                if False and "more efficient to compute target_indices":
-                    col_indices = torch.arange(delta_max, device=device).unsqueeze(0)
-                    indices = cached_lengths_list[eval_iter].view(-1, 1) + col_indices
-                    mask = col_indices < delta_lengths.view(-1, 1)
-                    indices = indices * mask
-                    print(f"is equal? {indices.equal(target_indices)}")
+                    if cache_use_type == "selective":
+                        cached_mask = get_cached_mask(
+                            cached_lengths=cur_lengths,
+                            max_sequence_length=N,
+                            device=device,
+                        )                    
+                else:
+                    B, N = seq_features.past_ids.shape
+                    row_idx = torch.arange(N, device=device).unsqueeze(0)
+                    if use_gpu_cache:
+                        cur_lengths = cached_lengths_list[eval_iter]
+                        cur_cache = base_cache_list[eval_iter]
+                    else:
+                        cur_lengths = cached_lengths_list[eval_iter].to(device)
+                        cur_cache = [
+                            tuple(tensor.to(device, non_blocking=False) if tensor is not None else None for tensor in layer)
+                            for layer in cur_cache
+                        ]
+                    cached = cur_lengths.view(B, 1)
+                    past = seq_features.past_lengths.view(B, 1)
+                    mask = (row_idx >= cached) & (row_idx < past) # [128, 211]
+                    delta_lengths = seq_features.past_lengths - cur_lengths
+                    delta_max = torch.max(delta_lengths)
+                    indices = [torch.arange(c, p) for c, p in zip(cur_lengths, seq_features.past_lengths)]
+                    target_indices = torch.full((B, delta_max), 0, device=device)
 
-                # print(f"target_indices[1] is {target_indices[1]}")
+                    for i, idx in enumerate(indices):
+                        target_indices[i, :len(idx)] = idx
 
-                if False and "all delta is the same":
-                    target_indices = torch.stack([torch.arange(c, p) for c, p in zip(cached_lengths_list[eval_iter], seq_features.past_lengths)], dim=0).to(device)
-                # mask = torch.ones_like(mask)
-                # mask[0] = mask_0
+                    if False and "more efficient to compute target_indices":
+                        col_indices = torch.arange(delta_max, device=device).unsqueeze(0)
+                        indices = cached_lengths_list[eval_iter].view(-1, 1) + col_indices
+                        mask = col_indices < delta_lengths.view(-1, 1)
+                        indices = indices * mask
+                        print(f"is equal? {indices.equal(target_indices)}")
 
-                delta_x_offsets = (delta_lengths, target_indices)
-                base_cache = base_cache_list[eval_iter]
-                base_cache = [
-                    tuple(tensor.to(device, non_blocking=False) if tensor is not None else None for tensor in layer)
-                    for layer in base_cache
-                ]
-                if cache_use_type == "selective":
-                    cached_mask = get_cached_mask(
-                        # cached_lengths=cached_lengths_list[eval_iter].to(device),
-                        cached_lengths=cached_lengths_list[eval_iter],
-                        max_sequence_length=N,
-                        device=device,
-                    )
-                    # print(f"cached_mask is {cached_mask}")
-                # torch.cuda.synchronize()
+                    if False and "all delta is the same":
+                        target_indices = torch.stack([torch.arange(c, p) for c, p in zip(cached_lengths_list[eval_iter], seq_features.past_lengths)], dim=0).to(device)
+                    # mask = torch.ones_like(mask)
+                    # mask[0] = mask_0
+
+                    delta_x_offsets = (delta_lengths, target_indices)
+
+                    if cache_use_type == "selective":
+                        cached_mask = get_cached_mask(
+                            cached_lengths=cur_lengths,
+                            max_sequence_length=N,
+                            device=device,
+                        )
+                        # print(f"cached_mask is {cached_mask}")
+                torch.cuda.synchronize()
+            # print(f"load cur batch cache and lengths need {time.time()-begin_time:.6f} s") # 0.5-0.8s
 
             if return_cache_states:
                 if return_encoded_embeddings:
@@ -425,7 +540,7 @@ def run_an_e2e(
                         target_ratings=target_ratings,
                         user_max_batch_size=eval_batch_size,
                         dtype=torch.bfloat16 if main_module_bf16 else None,
-                        cache=base_cache if base_cache_list is not None else None, 
+                        cache=cur_cache if base_cache_list is not None else None, 
                         return_cache_states=return_cache_states,
                         return_encode_time=True,
                         use_all_padded=use_all_padded,
@@ -443,7 +558,7 @@ def run_an_e2e(
                         target_ratings=target_ratings,
                         user_max_batch_size=eval_batch_size,
                         dtype=torch.bfloat16 if main_module_bf16 else None,
-                        cache=base_cache if base_cache_list is not None else None, # test for delta kvc
+                        cache=cur_cache if base_cache_list is not None else None, # test for delta kvc
                         return_cache_states=return_cache_states,
                         return_encode_time=True,
                         use_all_padded=use_all_padded,
@@ -462,7 +577,7 @@ def run_an_e2e(
                         target_ratings=target_ratings,
                         user_max_batch_size=eval_batch_size,
                         dtype=torch.bfloat16 if main_module_bf16 else None,
-                        cache=base_cache if base_cache_list is not None else None, # test for delta kvc
+                        cache=cur_cache if base_cache_list is not None else None, # test for delta kvc
                         return_cache_states=return_cache_states,
                         return_encode_time=True,
                         use_all_padded=use_all_padded,
@@ -480,7 +595,7 @@ def run_an_e2e(
                         target_ratings=target_ratings,
                         user_max_batch_size=eval_batch_size,
                         dtype=torch.bfloat16 if main_module_bf16 else None,
-                        cache=base_cache if base_cache_list is not None else None, # test for delta kvc
+                        cache=cur_cache if base_cache_list is not None else None, # test for delta kvc
                         return_cache_states=return_cache_states,
                         return_encode_time=True,
                         use_all_padded=use_all_padded,
@@ -501,7 +616,7 @@ def run_an_e2e(
             for k, v in eval_dict.items():
                 eval_dict_all[k] = eval_dict_all[k] + [v]
             del eval_dict
-            # if eval_iter == 0:
+            # if eval_iter == 10:
             #     break
             # torch.cuda.synchronize()
 
@@ -533,6 +648,8 @@ def run_3_type(
     enable_profiler=False,  # 新增的参数，用于控制是否启用 profiler
     base_cache_list=None,
     cached_lengths_list=None,
+    use_cache_dir_path=True,
+    use_gpu_cache=False,
     return_encoded_embeddings: bool = False,
     r: int = 20,  
 ):
@@ -566,6 +683,8 @@ def run_3_type(
         use_all_padded=True,
         base_cache_list=base_cache_list,
         cached_lengths_list=cached_lengths_list,
+        use_cache_dir_path=use_cache_dir_path,
+        use_gpu_cache=use_gpu_cache,
         return_encoded_embeddings=False,
         enable_profiler=enable_profiler,
     )
@@ -583,7 +702,17 @@ def run_3_type(
         base_cache_list=base_cache_list,
         cached_lengths_list=cached_lengths_list,
         use_all_padded=True,
+        use_cache_dir_path=use_cache_dir_path,
+        use_gpu_cache=use_gpu_cache,
         r=r,
         enable_profiler=enable_profiler,
     )
 
+def save_compressed(data, filename):
+    with gzip.open(filename, 'wb') as f:
+        torch.save(data, f)
+
+def load_compressed(filename):
+    with gzip.open(filename, 'rb') as f:
+        return torch.load(f)
+    

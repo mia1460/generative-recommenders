@@ -9,6 +9,8 @@ import torch
 import re
 import csv
 import matplotlib.ticker as mtick
+import seaborn as sns
+from scipy.stats import pearsonr
 
 def convert_to_timestamp(dates):
     """
@@ -162,29 +164,68 @@ def convert_log_to_csv(input_file):
 
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
     def extract_metrics(log_content):
-        pattern = r'\[loading checkpoint\] from: (.*?)\n.*?metrics are: (.*?)\n'
-        matches = re.findall(pattern, log_content, re.DOTALL)
+        # 匹配检查点块的正则表达式
+        checkpoint_pattern = r'\[loading checkpoint\] from: (.*?)\n(.*?)(?=\n\*{80}|\Z)'
+        # checkpoint_pattern = r'\[loading checkpoint\] from: (.*?)\n(.*?)(?=\n[\*]{3,}|\n={3,}|\Z)'
+        checkpoint_blocks = re.findall(checkpoint_pattern, log_content, re.DOTALL)
 
         data = []
-        for match in matches:
-            ckpt_path = match[0].strip()
-            ckpt_file = os.path.basename(ckpt_path)
+        for ckpt_path, block_content in checkpoint_blocks:
+            ckpt_file = os.path.basename(ckpt_path.strip())
             model_name = os.path.splitext(ckpt_file)[0]
-            metrics_str = match[1].strip()
 
-            metrics = {}
-            metrics_pairs = re.findall(r'([A-Z]+@\d+|\bMRR\b)\s+([0-9.]+)', metrics_str)
-            for key, value in metrics_pairs:
-                metrics[key] = float(value)
+            # 匹配普通缓存类型（no/fully）的 avg_time 和 metrics
+            eval_pattern = r'''
+                =+\s+begin\s+evaling\s+use\s+(\w+)\s+cache.*?=\s*\n  # 匹配缓存类型
+                .*?eval\s+use\s+\w+\s+cache\s+need\s+avg\s+:\s+([\d.]+)\s+ms\n  # 提取 avg_time
+                .*?metrics\s+are:\s+(.*?)\n  # 提取指标
+            '''
+            eval_matches = re.findall(eval_pattern, block_content, re.DOTALL | re.VERBOSE)
 
-            data.append({
-                'cache_type': 'no',
-                'model_name': model_name,
-                **metrics
-            })
+            # 匹配 selective 缓存类型
+            selective_pattern = r'''
+                !!!recompute_ratio\s+is\s+(\d+)!!!  # 提取重计算比例
+                .*?eval\s+use\s+selective\s+cache\s+need\s+avg\s+:\s+([\d.]+)\s+ms\n  # 提取 avg_time
+                .*?metrics\s+are:\s+(.*?)\n  # 提取指标
+            '''
+            selective_matches = re.findall(selective_pattern, block_content, re.DOTALL | re.VERBOSE)
+
+            # 处理 no/fully 类型
+            for match in eval_matches:
+                cache_type, avg_time_str, metrics_str = match
+                if cache_type == 'selective':
+                    continue
+                
+                metrics = extract_metrics_pairs(metrics_str)
+                data.append({
+                    'model_name': model_name,
+                    'cache_type': cache_type,
+                    'recompute_ratio': 0,
+                    'avg_time(ms)': float(avg_time_str),
+                    **metrics
+                })
+
+            # 处理 selective 类型
+            for ratio, avg_time_str, metrics_str in selective_matches:
+                metrics = extract_metrics_pairs(metrics_str)
+                data.append({
+                    'model_name': model_name,
+                    'cache_type': 'selective',
+                    'recompute_ratio': int(ratio),
+                    'avg_time(ms)': float(avg_time_str),
+                    **metrics
+                })
 
         return data
+
+    def extract_metrics_pairs(metrics_str):
+        metrics = {}
+        metrics_pairs = re.findall(r'([A-Z]+@\d+|\bMRR\b)\s+([0-9.]+)', metrics_str)
+        for key, value in metrics_pairs:
+            metrics[key] = float(value)
+        return metrics
 
     metrics_data = extract_metrics(content)
     
@@ -192,14 +233,17 @@ def convert_log_to_csv(input_file):
         print("No valid data found.")
         return
     
-    fieldnames = ['cache_type', 'model_name'] + list(metrics_data[0].keys())[2:]
+    # 动态获取字段（包含 avg_time）
+    fieldnames = ['model_name', 'cache_type', 'recompute_ratio', 'avg_time(ms)']
+    metric_fields = sorted({k for row in metrics_data for k in row.keys() if k not in fieldnames})
+    fieldnames += metric_fields
     
     with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(metrics_data)
-    print(f"metrics saved at {output_file}")
-
+    
+    print(f"Metrics saved at {output_file}")
     return output_file
 
 def plot_metrics_from_csv(csv_file, output_dir='/home/yinj@/datas/grkvc/graphs', output_name='metrics_comparison_line.png'):
@@ -364,13 +408,445 @@ def plot_selective_metrics_from_csv(csv_file, output_dir='/home/yinj@/datas/grkv
         plt.close()  # 确保关闭画布
         print(f"plot failure! {str(e)}")
 
+def filter_rows_by_seq_len(inputfile, max_seq_len, item_column='sequence_item_ids'):
+    file_dir, file_name = os.path.split(inputfile)
+    file_base, file_ext = os.path.splitext(file_name)
+    output_file = os.path.join(file_dir, f"{file_base}_full_{max_seq_len}.csv")
+    df = pd.read_csv(inputfile)
+    
+    # 定义一个内部函数来计算逗号分隔的元素个数
+    def count_items(item_list):
+        return len(item_list.split(','))
+
+    # 应用这个函数到指定列，并筛选出元素个数等于目标值的行
+    df_filtered = df[df[item_column].apply(count_items) == max_seq_len]
+
+    # 保存筛选后的DataFrame到CSV
+    df_filtered.to_csv(output_file, index=False)
+
+    print(f"Filtered data saved to {output_file}") 
+
+def plot_1_model_selective_metrics_from_full_test_csv(csv_file, model_name, output_dir='/home/yinj@/datas/grkvc/graphs', image_prefix='metrics'):
+    """
+    绘制指定模型的性能指标和推理时间图表，并保存为图片。
+
+    参数:
+    - df: DataFrame，包含模型的性能数据。
+    - model_name: str，要绘制的模型名称。
+    - image_prefix: str，保存图片的前缀名称。
+    """
+    try:
+        # 检查输入文件是否存在
+        if not os.path.exists(csv_file):
+            raise FileNotFoundError(f"csv file is not exist{csv_file}")
+
+        # 创建输出目录
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 读取数据
+        df = pd.read_csv(csv_file)
+        # 筛选特定模型版本
+        df_model = df[df["model_name"] == model_name]
+
+        # 创建画布和子图
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+
+        # 绘制性能指标（HR@10）
+        for cache_type in df_model["cache_type"].unique():
+            df_cache = df_model[df_model["cache_type"] == cache_type]
+            ax1.plot(
+                df_cache["recompute_ratio"],
+                df_cache["HR@10"],
+                label=f"{cache_type} cache",
+                marker="o" if cache_type == "selective" else None,
+            )
+
+        ax1.set_title(f"HR@10 vs Recompute Ratio ({model_name})")
+        ax1.set_xlabel("Recompute Ratio")
+        ax1.set_ylabel("HR@10")
+        ax1.legend()
+        ax1.grid(True)
+
+        # 绘制推理时间（avg_time）
+        for cache_type in df_model["cache_type"].unique():
+            df_cache = df_model[df_model["cache_type"] == cache_type]
+            ax2.plot(
+                df_cache["recompute_ratio"],
+                df_cache["avg_time(ms)"],
+                label=f"{cache_type} cache",
+                marker="o" if cache_type == "selective" else None,
+            )
+
+        ax2.set_title(f"Avg Time vs Recompute Ratio ({model_name})")
+        ax2.set_xlabel("Recompute Ratio")
+        ax2.set_ylabel("Avg Time (ms)")
+        ax2.legend()
+        ax2.grid(True)
+
+        # 调整布局
+        plt.tight_layout()
+
+        # 保存图片
+        image_filename = f"{image_prefix}_{model_name}.png"
+        plt.savefig(image_filename)
+
+        print(f"Image saved as {image_filename}")
+    except Exception as e:
+        plt.close()  # 确保关闭画布
+        print(f"plot failure! {str(e)}")
+
+def plot_metrics(csv_file, selected_metrics, skip_model, output_dir='/home/yinj@/datas/grkvc/graphs', image_prefix='hahaha'):
+    # 读取CSV文件
+    df = pd.read_csv(csv_file)
+    
+    # 获取所有的模型名称，排除skip_model中的模型
+    model_names = df['model_name'].unique()
+    model_names = [model for model in model_names if model not in skip_model]
+    
+    # 1. 绘制不同recompute_ratio指标对比图，排布成一张图，4行3列
+    fig, axes = plt.subplots(len(model_names), len(selected_metrics), figsize=(15, 5 * len(model_names)))
+    axes = axes.flatten()  # 将 2D 数组展平为 1D 方便索引
+
+    for idx, model_name in enumerate(model_names):
+        df_model = df[df["model_name"] == model_name]
+        
+        for i, metric in enumerate(selected_metrics):
+            ax = axes[idx * len(selected_metrics) + i]  # 获取对应位置的子图
+            legend_added = False  # 用于控制图例添加
+            # 只绘制selective的线
+            df_cache_selective = df_model[df_model["cache_type"] == "selective"]
+            ax.plot(
+                df_cache_selective["recompute_ratio"],
+                df_cache_selective[metric],
+                label=f"selective cache",
+                marker="o",
+            )
+
+            # 添加两条水平虚线，代表no和fully对应的指标
+            no_value = df_model[df_model["cache_type"] == "no"][metric].iloc[0]
+            fully_value = df_model[df_model["cache_type"] == "fully"][metric].iloc[0]
+            ax.axhline(no_value, color='red', linestyle='--', label="no cache")
+            ax.axhline(fully_value, color='blue', linestyle='--', label="fully cache")
+
+            ax.set_title(f"{metric} vs Recompute Ratio ({model_name})")
+            ax.set_xlabel("Recompute Ratio")
+            ax.set_ylabel(metric)
+            ax.grid(True)
+
+            ax.legend()
+
+    # 保存图片
+    image_filename = os.path.join(output_dir, f"{image_prefix}_recompute_ratio_metrics.png")
+    plt.tight_layout()
+    plt.savefig(image_filename)
+    plt.close()
+    print(f"Saved {image_filename}")
+
+    # 2. 绘制不同recompute_ratio时间对比图，排布成1行4列
+    fig, axes = plt.subplots(1, len(model_names), figsize=(20, 5))  # 1 行 4 列
+    for i, model_name in enumerate(model_names):
+        df_model = df[df["model_name"] == model_name]
+        ax = axes[i]  # 选择对应的子图位置
+        legend_added = False  # 用于控制图例添加
+        # 只绘制selective的线
+        df_cache_selective = df_model[df_model["cache_type"] == "selective"]
+        ax.plot(
+            df_cache_selective["recompute_ratio"],
+            df_cache_selective["avg_time(ms)"],
+            label=f"selective cache",
+            marker="o",
+        )
+
+        # 添加两条水平虚线，代表no和fully对应的avg_time
+        no_avg_time = df_model[df_model["cache_type"] == "no"]["avg_time(ms)"].iloc[0]
+        fully_avg_time = df_model[df_model["cache_type"] == "fully"]["avg_time(ms)"].iloc[0]
+        ax.axhline(no_avg_time, color='red', linestyle='--', label="no cache")
+        ax.axhline(fully_avg_time, color='blue', linestyle='--', label="fully cache")
+
+        ax.set_title(f"Avg Time vs Recompute Ratio ({model_name})")
+        ax.set_xlabel("Recompute Ratio")
+        ax.set_ylabel("Avg Time (ms)")
+        ax.grid(True)
+
+        ax.legend()
+
+    # 保存图片
+    image_filename = os.path.join(output_dir, f"{image_prefix}_recompute_ratio_time.png")
+    plt.tight_layout()
+    plt.savefig(image_filename)
+    plt.close()
+    print(f"Saved {image_filename}")
+
+    # 3. 绘制完全复用精度损失图，排布成1行3列
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))  # 1 行 3 列
+    for i, metric in enumerate(selected_metrics):
+        ax = axes[i]
+        
+        width = 0.35  # 设置柱状图的宽度，确保柱子之间正常相邻
+        offset = width/2  # 设置偏移量为0，确保柱子紧挨
+        
+        legend_added = False  # 用于控制图例添加
+        
+        for j, model_name in enumerate(model_names):
+            df_model = df[df["model_name"] == model_name]
+            # 提取 no 和 fully 的指标数据
+            no_metric_value = df_model[df_model["cache_type"] == "no"][metric].iloc[0]
+            fully_metric_value = df_model[df_model["cache_type"] == "fully"][metric].iloc[0]
+            
+            # 获取日期部分
+            model_date = model_name.split('_')[-1]  # 假设日期在模型名的最后部分，格式如 model_02-02
+            x_position = j  # 偏移量，确保柱状图不重叠
+            
+            # 绘制柱状图
+            ax.bar(x_position - offset, no_metric_value, width=width, label="no cache", align="center", color='#4C72B0')
+            ax.bar(x_position + offset, fully_metric_value, width=width, label="fully cache", align="center", color='#DD8452')
+
+            # 只在第一次添加图例时才显示
+            if not legend_added:
+                ax.legend(["no cache", "fully cache"])
+                legend_added = True
+
+        ax.set_title(f"{metric} Loss vs Model Name")
+        ax.set_xlabel("Model Name")
+        ax.set_ylabel(f"{metric}")
+        ax.set_xticks(range(len(model_names)))  # 横坐标位置
+        ax.set_xticklabels([model_name.split('_')[-1] for model_name in model_names])  # 横坐标标签为日期
+        ax.grid(True, linestyle='--', alpha=0.35)
+
+    # 保存图片
+    image_filename = os.path.join(output_dir, f"{image_prefix}_loss_comparison.png")
+    plt.tight_layout()
+    plt.savefig(image_filename)
+    plt.close()
+    print(f"Saved {image_filename}")
+
+def compute_kv_diff(file1, file2, length_file, output_dir, output_prefix):
+    # 确保输出文件夹存在
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 加载两个KV cache文件
+    kv_cache1 = torch.load(file1)
+    kv_cache2 = torch.load(file2)
+
+    # 加载有效缓存长度
+    cache_lengths = torch.load(length_file)
+
+    # 初始化存储差异的列表
+    k_diff_list = []
+    v_diff_list = []
+    kv_diff_list = []
+
+    # 遍历每一层的KV cache
+    for layer_idx in range(len(kv_cache1)):
+        # 获取当前层的K和V
+        v1, k1 = kv_cache1[layer_idx][0], kv_cache1[layer_idx][2]
+        v2, k2 = kv_cache2[layer_idx][0], kv_cache2[layer_idx][2]
+
+        # 计算K和V的差异（欧氏距离）
+        k_diff = torch.norm(k1 - k2, dim=2)  # 形状为 (B, N)
+        v_diff = torch.norm(v1 - v2, dim=2)  # 形状为 (B, N)
+        kv_diff = k_diff + v_diff  # 形状为 (B, N)
+
+        # 根据有效缓存长度拼接所有用户的差异值
+        layer_k_diff = []
+        layer_v_diff = []
+        layer_kv_diff = []
+        for b in range(k1.size(0)):
+            layer_k_diff.append(k_diff[b, :cache_lengths[b]])
+            layer_v_diff.append(v_diff[b, :cache_lengths[b]])
+            layer_kv_diff.append(kv_diff[b, :cache_lengths[b]])
+
+        # 将当前层的差异值拼接为一个形状为 (L,) 的张量
+        layer_k_diff = torch.cat(layer_k_diff)
+        layer_v_diff = torch.cat(layer_v_diff)
+        layer_kv_diff = torch.cat(layer_kv_diff)
+
+        # 将当前层的差异值添加到列表中
+        k_diff_list.append(layer_k_diff)
+        v_diff_list.append(layer_v_diff)
+        kv_diff_list.append(layer_kv_diff)
+
+    # 将差异值保存到文件中
+    k_save_path = os.path.join(output_dir, f"{output_prefix}_k_diff.pt")
+    v_save_path = os.path.join(output_dir, f"{output_prefix}_v_diff.pt")
+    kv_save_path = os.path.join(output_dir, f"{output_prefix}_kv_diff.pt")
+    torch.save(k_diff_list, k_save_path)
+    torch.save(v_diff_list, v_save_path)
+    torch.save(kv_diff_list, kv_save_path)
+
+    print(f"Saved k_diff to {k_save_path}")
+    print(f"Saved v_diff to {v_save_path}")
+    print(f"Saved kv_diff to {kv_save_path}")
+
+def plot_diff_heatmap(diff_file_path, output_dir, output_prefix, token_start, token_end, title=None):
+    # 确保输出文件夹存在
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 加载差异文件
+    diff_data = torch.load(diff_file_path)  # 形状为 (16, 12672)
+
+    # 将每层的差异值堆叠成一个形状为 (16, 12672) 的张量
+    diff_tensor = torch.stack(diff_data)  # 形状为 (16, 12672)
+
+    # 提取指定范围内的 token 数据
+    heatmap_data = diff_tensor[:, token_start:token_end]  # 形状为 (16, token_end - token_start)
+
+    # 将数据转换为 NumPy 数组
+    heatmap_data_np = heatmap_data.numpy()
+
+    # 创建热力图
+    plt.figure(figsize=(10, 6))
+    plt.imshow(
+        heatmap_data_np,
+        cmap='Blues',  # 使用蓝色调色板
+        aspect='auto',  # 自动调整纵横比
+        vmin=np.min(heatmap_data_np),  # 颜色映射的最小值
+        vmax=np.max(heatmap_data_np),  # 颜色映射的最大值
+        alpha=0.8  # 设置透明度
+    )
+    plt.colorbar(label='Diff Value')  # 添加颜色条
+    plt.title(title or f'Diff Heatmap (Tokens {token_start} to {token_end})')
+    plt.xlabel('Token Index')
+    plt.ylabel('Layer ID')
+
+    # 设置横轴和纵轴刻度
+    num_tokens = token_end - token_start
+    xticks = range(0, num_tokens, max(1, num_tokens // 10))  # 横轴刻度
+    xtick_labels = range(token_start, token_end, max(1, num_tokens // 10))  # 横轴刻度标签
+    plt.xticks(xticks, labels=xtick_labels)  # 设置横轴刻度和标签
+
+    yticks = range(len(diff_data))  # 纵轴刻度
+    ytick_labels = range(len(diff_data))  # 纵轴刻度标签
+    plt.yticks(yticks, labels=ytick_labels)  # 设置纵轴刻度和标签
+
+    # 保存热力图
+    output_path = os.path.join(output_dir, f"{output_prefix}_heatmap_token{token_start}_to_{token_end}.png")
+    plt.savefig(output_path, bbox_inches='tight', dpi=300)
+    plt.close()
+
+    print(f"Saved cheatmap to {output_path}")
+
+def plot_layer_correlation(diff_file_path, output_dir, output_prefix, threshold=None, title=None):
+    # 确保输出文件夹存在
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 加载差异文件
+    diff_data = torch.load(diff_file_path)  # 形状为 (16, L)
+
+    # 将每层的差异值堆叠成一个形状为 (16, L) 的张量
+    diff_tensor = torch.stack(diff_data)  # 形状为 (16, L)
+
+    # 计算相邻层的皮尔森相关性系数
+    correlations = []
+    layer_pairs = []
+    for i in range(len(diff_tensor) - 1):
+        layer1 = diff_tensor[i].numpy()  # 当前层
+        layer2 = diff_tensor[i + 1].numpy()  # 下一层
+        corr, _ = pearsonr(layer1, layer2)  # 计算皮尔森相关性系数
+        correlations.append(corr)
+        layer_pairs.append(f"{i+1} vs {i+2}")  # 记录相邻层的标签
+
+    # 创建相关性系数图
+    plt.figure(figsize=(10, 6))
+    plt.bar(
+        layer_pairs, 
+        correlations, 
+        color='#1f77b4',  # 浅蓝色
+        alpha=0.8  # 设置透明度
+    )
+    plt.title(title or 'Layer-wise Pearson Correlation')
+    plt.xlabel('Adjacent Layers')
+    plt.ylabel('Pearson Correlation Coefficient')
+    plt.ylim(0, 1)  # 设置纵轴范围为 [0, 1]
+
+    # 绘制虚线（如果传入了阈值）
+    if threshold is not None:
+        plt.axhline(
+            threshold, 
+            color='red',  # 灰色
+            linestyle='--',  # 虚线
+            linewidth=1.5,  # 线宽
+            label=f'Threshold: {threshold}'  # 图例标签
+        )
+        plt.legend()  # 显示图例
+
+    # 保存图
+    output_path = os.path.join(output_dir, f"{output_prefix}_layer_correlation.png")
+    plt.savefig(output_path, bbox_inches='tight', dpi=300)
+    plt.close()
+
+    print(f"layer correlateion saved {output_path}")
+
 train_200_csv_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_train_max_200.csv'
 test_200_csv_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200.csv'
+test_full_200_csv_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200.csv'
+
+if False and "compute kv diff":
+    cache_1 = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-02/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_1_cache_on_cpu.pt'
+    cache_2 = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-16/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_1_cache_on_cpu.pt'
+    length_file = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-16/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_1_lengths_on_cpu.pt'
+    output_dir = '/home/yinj@/datas/grkvc/diff_kv/'
+    output_prefix = '15-02-02_vs_15-02-16_batch_1'
+    compute_kv_diff(file1=cache_1, file2=cache_2, length_file=length_file, output_dir=output_dir, output_prefix=output_prefix)
+
+if False and "see the kv diff's content":
+    k_diff_file = '/home/yinj@/datas/grkvc/diff_kv/15-02-02_vs_15-02-16_batch_1_k_diff.pt'
+    kv_diff_file = '/home/yinj@/datas/grkvc/diff_kv/15-02-02_vs_15-02-16_batch_1_kv_diff.pt'
+    k_diff = torch.load(k_diff_file)
+    kv_diff = torch.load(kv_diff_file)
+    print(f"k: len-{len(k_diff)}, shape-{k_diff[0].shape}, kv: len-{len(kv_diff)}, shape-{kv_diff[0].shape}")
+
+if False and "[maybe wrong] plot kv diff heatmap by user_id and layer_id":
+    # don't know why layer 0 has so significant diff, maybe because different model has different embedding table, which influence much more
+    data_file_prefix = '/home/yinj@/datas/grkvc/diff_kv/15-02-02_vs_15-02-16_batch_1_'
+    output_dir = '/home/yinj@/datas/grkvc/diff_kv/'
+    output_prefix = '15-02-02_vs_15-02-16_batch_1_'
+    suffixes = ['k_diff.pt', 'v_diff.pt', 'kv_diff.pt']
+    token_start = 99
+    token_end = 197
+    for suffix in suffixes:
+        plot_diff_heatmap(diff_file_path=data_file_prefix+suffix, output_dir=output_dir, output_prefix=output_prefix+suffix.replace('.pt', ''), token_start=token_start, token_end=token_end)
+
+if False and "plot correlation":
+    data_file_prefix = '/home/yinj@/datas/grkvc/diff_kv/15-02-02_vs_15-02-16_batch_1_'
+    output_dir = '/home/yinj@/datas/grkvc/diff_kv/'
+    output_prefix = '15-02-02_vs_15-02-16_batch_1_'
+    suffixes = ['k_diff.pt', 'v_diff.pt', 'kv_diff.pt']
+    threshold = 0.75
+    for suffix in suffixes:
+        plot_layer_correlation(diff_file_path=data_file_prefix+suffix, output_dir=output_dir, output_prefix=output_prefix+suffix.replace('.pt', ''), threshold=threshold)
+
+if False and "load cached_kv see what is in it":
+    cached_kv_file = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-16/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_1_cache_on_cpu.pt'
+    data = torch.load(cached_kv_file)
+    print(f"the len of data is {len(data)}, cached_v is {data[0][0].shape}, cached_k is {data[0][2].shape}")
+
+if False and "process data for fullly seq_len ":
+    filter_rows_by_seq_len(test_200_csv_file, max_seq_len=200)
 
 if False and "convert log to csv":
     # log_file = '/home/yinj@/datas/grkvc/result_logs/see_delta_2_week_5_times.log'
     log_file = '/home/yinj@/datas/grkvc/perfect_datas/see_5_model_metrics_on_max_200.log'
+    log_file = '/home/yinj@/datas/grkvc/perfect_datas/about_5_model_no_fully_selective_range_r_metrics_full_200.log'
+    log_file = '/home/yinj@/datas/grkvc/perfect_datas/b150_d10_f200.log'
+    log_file = '/home/yinj@/datas/grkvc/perfect_datas/b100_d5_f200.log'
     convert_log_to_csv(input_file=log_file)
+
+if False and "plot recompute_ratio_metrics, recompute_ratio_time, loss pictures":
+    csv_file = '/home/yinj@/datas/grkvc/perfect_datas/about_5_model_no_fully_selective_range_r_metrics_full_200.csv'
+    csv_file = '/home/yinj@/datas/grkvc/perfect_datas/b150_d10_f200.csv'
+    csv_file = '/home/yinj@/datas/grkvc/perfect_datas/b100_d5_f200.csv'
+    selected_metrics = ['NDCG@10', 'HR@10', 'MRR']
+    skip_model = 'model_ep20_15-02-02'
+    image_prefix = 'b100_d10'
+    image_prefix = 'b150_d10'
+    image_prefix = 'b100_d5'
+    plot_metrics(csv_file=csv_file, selected_metrics=selected_metrics, skip_model=skip_model, image_prefix=image_prefix)
+
+if False and "plot one model selective metrics from full test csv":
+    csv_file = '/home/yinj@/datas/grkvc/perfect_datas/about_5_model_no_fully_selective_range_r_metrics_full_200.csv'
+    model_name = 'model_ep20_15-02-16'
+    plot_1_model_selective_metrics_from_full_test_csv(csv_file=csv_file, model_name=model_name)
 
 if False and "plot metrics from csv":
     # csv_file = '/home/yinj@/datas/grkvc/result_logs/see_delta_2_week_5_times.csv'
@@ -386,7 +862,7 @@ if False and "plot selective metrics from csv":
     graph_name = 'see_5_model_metrics_on_max_200.png'
     plot_selective_metrics_from_csv(csv_file=csv_file, output_dir=output_dir, output_name=graph_name)
 
-if True and "parse log then plot selective metrics":
+if False and "parse log then plot selective metrics":
     log_file = '/home/yinj@/datas/grkvc/perfect_datas/see_5_model_metrics_on_max_200_max_100.log'
     output_dir = '/home/yinj@/datas/grkvc/graphs'
     csv_file = convert_log_to_csv(input_file=log_file)
@@ -394,13 +870,17 @@ if True and "parse log then plot selective metrics":
     plot_selective_metrics_from_csv(csv_file=csv_file, output_dir=output_dir, output_name=graph_name)
 
 if False and "truncate data by max_len":
-    inputfile = test_200_csv_file
-    truncate_sequence_data(inputfile=inputfile, max_seq_len=50)
-    truncate_sequence_data(inputfile=inputfile, max_seq_len=60)
-    truncate_sequence_data(inputfile=inputfile, max_seq_len=100)
-    truncate_sequence_data(inputfile=inputfile, max_seq_len=110)
-    truncate_sequence_data(inputfile=inputfile, max_seq_len=150)
-    truncate_sequence_data(inputfile=inputfile, max_seq_len=160)
+    inputfile = test_full_200_csv_file
+    # truncate_sequence_data(inputfile=inputfile, max_seq_len=50)
+    # truncate_sequence_data(inputfile=inputfile, max_seq_len=60)
+    # truncate_sequence_data(inputfile=inputfile, max_seq_len=100)
+    # truncate_sequence_data(inputfile=inputfile, max_seq_len=110)
+    # truncate_sequence_data(inputfile=inputfile, max_seq_len=150)
+    # truncate_sequence_data(inputfile=inputfile, max_seq_len=160)
+    truncate_sequence_data(inputfile=inputfile, max_seq_len=105)
+    truncate_sequence_data(inputfile=inputfile, max_seq_len=120)
+    truncate_sequence_data(inputfile=inputfile, max_seq_len=155)
+    truncate_sequence_data(inputfile=inputfile, max_seq_len=170)
 
 if False and "truncate data by timestamp":
     dates = ["2015-02-03", "2015-02-17", "2015-03-03", "2015-03-17", "2015-03-31"]

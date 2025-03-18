@@ -68,7 +68,7 @@ from generative_recommenders.research.data.dataset import DatasetV2, MultiFileDa
 # import torchvision.models as models
 from torch.profiler import profile, record_function, ProfilerActivity
 
-from utils import load_ckpt, get_filtered_config, print_eval_metrics, save_base_cache_and_lengths, run_an_e2e, run_3_type
+from utils import load_ckpt, get_filtered_config, print_eval_metrics, save_base_cache_and_lengths, run_an_e2e, run_3_type, save_compressed, load_compressed, save_batch_base_cache_and_lengths
 
 
 
@@ -130,10 +130,18 @@ gin.parse_config(filtered_config)
 # eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_loss_last5.csv'
 # eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test.csv'
 
-eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_max_100.csv'
-eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_max_110.csv'
+if False and "load data of b100, d10":
+    eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100.csv'
+    eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_110.csv'
+if True and "load data of b150, d10":
+    eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_150.csv'
+    eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_160.csv'
+if True and "load data of b100, d5":
+    eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100.csv'
+    eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_105.csv'
+
 eval_random_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_head_1281_max_200_loss_last_random_1_to_no_5.csv'
-eval_latest_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200.csv'
+eval_latest_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200.csv'
 eval_base_dataset = DatasetV2(
     ratings_file=eval_base_path,
     padding_length = max_sequence_length + 1,
@@ -264,23 +272,6 @@ base_ckpt_path='/home/yinj@/datas/grkvc/ckpts/ml-20m/model_base.ckpt'
 model_1_path='/home/yinj@/datas/grkvc/ckpts/ml-20m/model_1.ckpt'
 model_15_path='/home/yinj@/datas/grkvc/ckpts/ml-20m/model_15.ckpt'
 
-# ckpt_ep_10_prefix = '/home/yinj@/datas/grkvc/ckpts/ml-20m/model_ep10_'
-ckpt_ep_20_prefix = '/home/yinj@/datas/grkvc/ckpts/ml-20m/model_ep20_'
-ckpt_ep_25_prefix = '/home/yinj@/datas/grkvc/ckpts/ml-20m/model_ep25_'
-ckpt_ep_30_prefix = '/home/yinj@/datas/grkvc/ckpts/ml-20m/model_ep30_'
-ckpt_ep_35_prefix = '/home/yinj@/datas/grkvc/ckpts/ml-20m/model_ep35_'
-ckpt_ep_40_prefix = '/home/yinj@/datas/grkvc/ckpts/ml-20m/model_ep40_'
-ckpt_ep_45_prefix = '/home/yinj@/datas/grkvc/ckpts/ml-20m/model_ep45_'
-
-ckpt_prefix = ckpt_ep_20_prefix
-ckpt_prefix = ckpt_ep_25_prefix
-ckpt_prefix = ckpt_ep_30_prefix
-ckpt_prefix = ckpt_ep_35_prefix
-ckpt_prefix = ckpt_ep_40_prefix
-
-dates = ["15-02-02", "15-02-16", "15-03-02", "15-03-16", "15-03-30"]
-base_ckpt_path = ckpt_prefix + dates[4] + '.ckpt'
-
 def get_filenames_in_folder_os(ckpt_dir):
     filenames = []
     for item in os.listdir(ckpt_dir):
@@ -291,10 +282,11 @@ def get_filenames_in_folder_os(ckpt_dir):
 
 ckpt_dir = '/home/yinj@/datas/grkvc/ckpts/ml-20m'
 ckpt_files = get_filenames_in_folder_os(ckpt_dir)
+base_ckpt_file = ckpt_files[0]
 
 if True and "load base ckpt":
     load_ckpt(
-        ckpt_path = ckpt_files[0],
+        ckpt_path = base_ckpt_file,
         model = model,
         device = device
     )
@@ -332,7 +324,7 @@ if False and "when use the data about 1281 users":
     cached_lengths_path='/home/yinj@/datas/grkvc/base_cache_and_cached_lengths/padded_cached_lengths_1281_max_200_on_gpu_list.pt'
     use_gpu_flag = True
 
-if True and "when use data of about 1w+ users":
+if False and "when use data of about 1w+ users":
     cache_dir = '/mnt/data/gbase/yinj/grkvc/cached_kv/'
     prefix_name = os.path.splitext(os.path.basename(eval_base_path))[0]
     base_cache_path=os.path.join(cache_dir, prefix_name + '_padded_base_cache_on_cpu_list.pt')
@@ -340,22 +332,59 @@ if True and "when use data of about 1w+ users":
     use_gpu_flag = False
 
 # print(f"eval_batch_size is {local_batch_size}")
+# base_cache_dir = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-02/'
+base_cache_dir = '/mnt/data/gbase/yinj/grkvc/cached_kv/'
+if False and "generate different models' kv cache":
+    # base_cache_dir = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-02/'
+    # base_cache_dir = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-16/'
+    # base_cache_dir = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-03-02/'
+    # base_cache_dir = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-03-16/'
+    # base_cache_dir = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-03-30/'
+    print("hahaha")
+data_prefix = os.path.splitext(os.path.basename(eval_base_path))[0]
+use_gpu_flag = False
 if NEED_SAVE_BC:
-    save_base_cache_and_lengths(data_loader=eval_base_loader, device=device, gr_output_length=gr_output_length, eval_state=eval_state, model=model, eval_batch_size=local_batch_size, main_module_bf16=main_module_bf16, world_size=world_size, base_cache_path=base_cache_path, cached_lengths_path=cached_lengths_path, use_gpu=use_gpu_flag)
+    if False and "saved at one file":
+        save_base_cache_and_lengths(data_loader=eval_base_loader, device=device, gr_output_length=gr_output_length, eval_state=eval_state, model=model, eval_batch_size=local_batch_size, main_module_bf16=main_module_bf16, world_size=world_size, base_cache_path=base_cache_path, cached_lengths_path=cached_lengths_path, use_gpu=use_gpu_flag)
+    if True and "saved at multi small file":
+        cache_dir, lengths_dir = save_batch_base_cache_and_lengths(data_loader=eval_base_loader, device=device, gr_output_length=gr_output_length, eval_state=eval_state, model=model, eval_batch_size=local_batch_size, main_module_bf16=main_module_bf16, world_size=world_size, base_cache_dir=base_cache_dir, base_lengths_dir=base_cache_dir, data_prefix=data_prefix, use_gpu=use_gpu_flag)
+else:
+    cache_dir = os.path.join(base_cache_dir, data_prefix)
+    lengths_dir = os.path.join(base_cache_dir, data_prefix)
 
-if True and "load base cache":
+if False and "load base cache":
+    print(f"begin loading base cache from {base_cache_path}, and lengths from {cached_lengths_path}")
     base_cache_list = torch.load(base_cache_path)
     cached_lengths_list = torch.load(cached_lengths_path)
+    base_cache_path_list = []
+    base_lengths_path_list = []
+
+if False and "convert a full base cache to multi small file, while each contains a batch cache":
+    for i, batch in enumerate(base_cache_list):
+        base_cache_prefix = os.path.splitext(base_cache_path)[0]
+        cur_batch_cache_path = f'{base_cache_prefix}_batch_{i}.pt.gz'
+        print(f"saving {i} 's base cache: {cur_batch_cache_path}")
+        save_compressed(batch, cur_batch_cache_path)
+        base_cache_path_list.append(cur_batch_cache_path)
+    for i, batch in enumerate(cached_lengths_list):
+        base_lengths_prefix = os.path.splitext(cached_lengths_path)[0]
+        cur_batch_lengths_path = f'{base_lengths_prefix}_batch_{i}.pt.gz'
+        print(f"saving {i} 's base lengths: {cur_batch_lengths_path}")
+        save_compressed(batch, cur_batch_lengths_path)
+        base_lengths_path_list.append(cur_batch_lengths_path)
+    print(f"base_cache_path_list is {base_cache_path_list}, base_lengths_path_list is {base_lengths_path_list}")
+
+
 # print(f"base_cache_list[0].len is {len(base_cache_list[0])}")
 # print(f"base_cache_list[0][0] is {base_cache_list[0][0]}")
 # print(f"base_cache_list[0][0][0].shape is {base_cache_list[0][0][0]}, cached_lengths_list[0] is {cached_lengths_list[0]}")
 # print(f"the first user's cached length is {cached_lengths_list[0][0]}") # 43
 # print(f"base_cache: the first user's cached_k is {base_cache_list[0][:][2][:cached_lengths_list[0][0]].shape}\ncached_v is {base_cache_list[0][:][0][:cached_lengths_list[0][0]].shape}")
-if False:
+if True:
     run_an_e2e(
         cache_use_type = "no",
-        # data_loader=eval_delta_loader,
-        data_loader=eval_base_loader,
+        data_loader=eval_delta_loader,
+        # data_loader=eval_base_loader,
         device=device,
         gr_output_length=gr_output_length,
         eval_state=eval_state,
@@ -369,7 +398,7 @@ if False:
         # enable_profiler=True,
     )
 
-if False:
+# if False:
     run_an_e2e(
         cache_use_type = "fully",
         data_loader=eval_delta_loader,
@@ -383,17 +412,20 @@ if False:
         world_size=world_size,
         return_cache_states=False,
         use_all_padded=True,
-        base_cache_list=base_cache_list,
-        cached_lengths_list=cached_lengths_list,
+        base_cache_list=cache_dir,
+        cached_lengths_list=lengths_dir,
+        use_cache_dir_path=True,
+        use_gpu_cache=use_gpu_flag,
         return_encoded_embeddings=False,
         # enable_profiler=True,
     )
 
 
-if False:
+# if True:
     run_an_e2e(
         cache_use_type = "selective",
         data_loader=eval_delta_loader,
+        # data_loader=eval_base_loader,
         device=device,
         gr_output_length=gr_output_length,
         eval_state=eval_state,
@@ -401,9 +433,13 @@ if False:
         eval_batch_size=local_batch_size,
         main_module_bf16=main_module_bf16,
         world_size=world_size,
-        base_cache_list=base_cache_list,
-        cached_lengths_list=cached_lengths_list,
+        return_cache_states=False,
         use_all_padded=True,
+        base_cache_list=cache_dir,
+        cached_lengths_list=lengths_dir,
+        use_cache_dir_path=True,
+        use_gpu_cache=use_gpu_flag,
+        return_encoded_embeddings=False,
         r=50,
         # enable_profiler=True,
     )
@@ -433,38 +469,63 @@ if True:
             float_dtype=torch.bfloat16 if main_module_bf16 else None,
         )
 
-        run_an_e2e(
-            cache_use_type = "no",
-            data_loader=eval_base_loader,
-            # data_loader=eval_base_loader,
-            device=device,
-            gr_output_length=gr_output_length,
-            eval_state=eval_state,
-            model=model,
-            eval_batch_size=local_batch_size,
-            main_module_bf16=main_module_bf16,
-            world_size=world_size,
-            return_cache_states=False,
-            use_all_padded=True,
-            return_encoded_embeddings=False,
-            # enable_profiler=True,
-        )    
-        run_an_e2e(
-            cache_use_type = "fully",
-            data_loader=eval_delta_loader,
-            # data_loader=eval_base_loader,
-            device=device,
-            gr_output_length=gr_output_length,
-            eval_state=eval_state,
-            model=model,
-            eval_batch_size=local_batch_size,
-            main_module_bf16=main_module_bf16,
-            world_size=world_size,
-            return_cache_states=False,
-            use_all_padded=True,
-            base_cache_list=base_cache_list,
-            cached_lengths_list=cached_lengths_list,
-            return_encoded_embeddings=False,
-            # enable_profiler=True,
-        )
-        # run_3_type(eval_delta_loader, device, gr_output_length, eval_state, model, local_batch_size, main_module_bf16, world_size, enable_profiler=False, base_cache_list=base_cache_list, cached_lengths_list=cached_lengths_list, r=20)
+        if True:
+            run_an_e2e(
+                cache_use_type = "no",
+                data_loader=eval_delta_loader,
+                # data_loader=eval_base_loader,
+                device=device,
+                gr_output_length=gr_output_length,
+                eval_state=eval_state,
+                model=model,
+                eval_batch_size=local_batch_size,
+                main_module_bf16=main_module_bf16,
+                world_size=world_size,
+                return_cache_states=False,
+                use_all_padded=True,
+                return_encoded_embeddings=False,
+                # enable_profiler=True,
+            )    
+            run_an_e2e(
+                cache_use_type = "fully",
+                data_loader=eval_delta_loader,
+                # data_loader=eval_base_loader,
+                device=device,
+                gr_output_length=gr_output_length,
+                eval_state=eval_state,
+                model=model,
+                eval_batch_size=local_batch_size,
+                main_module_bf16=main_module_bf16,
+                world_size=world_size,
+                return_cache_states=False,
+                use_all_padded=True,
+                base_cache_list=cache_dir,
+                cached_lengths_list=lengths_dir,
+                use_cache_dir_path=True,
+                use_gpu_cache=use_gpu_flag,
+                return_encoded_embeddings=False,
+                # enable_profiler=True,
+            )
+            for r in range (0, 105, 5):
+                run_an_e2e(
+                    cache_use_type = "selective",
+                    data_loader=eval_delta_loader,
+                    # data_loader=eval_base_loader,
+                    device=device,
+                    gr_output_length=gr_output_length,
+                    eval_state=eval_state,
+                    model=model,
+                    eval_batch_size=local_batch_size,
+                    main_module_bf16=main_module_bf16,
+                    world_size=world_size,
+                    return_cache_states=False,
+                    use_all_padded=True,
+                    base_cache_list=cache_dir,
+                    cached_lengths_list=lengths_dir,
+                    use_cache_dir_path=True,
+                    use_gpu_cache=use_gpu_flag,
+                    return_encoded_embeddings=False,
+                    r=r,
+                    # enable_profiler=True,
+                )
+        # run_3_type(eval_delta_loader, device, gr_output_length, eval_state, model, local_batch_size, main_module_bf16, world_size, enable_profiler=False, base_cache_list=cache_dir, cached_lengths_list=lengths_dir, use_cache_dir_path=True, use_gpu_cache=use_gpu_flag, r=100)
