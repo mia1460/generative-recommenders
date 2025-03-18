@@ -33,6 +33,7 @@ from generative_recommenders.common import (
 from generative_recommenders.modules.hstu_transducer import HSTUTransducer
 from generative_recommenders.modules.multitask_module import (
     DefaultMultitaskModule,
+    MultitaskTaskType,
     TaskConfig,
 )
 from generative_recommenders.modules.positional_encoder import HSTUPositionalEncoder
@@ -50,8 +51,6 @@ from torchrec.modules.embedding_configs import EmbeddingConfig
 from torchrec.modules.embedding_modules import EmbeddingCollection
 
 logger: logging.Logger = logging.getLogger(__name__)
-
-torch.ops.load_library("//hammer/oss/generative_recommenders/ops/cpp:cpp_ops")
 
 torch.fx.wrap("fx_infer_max_len")
 torch.fx.wrap("len")
@@ -97,6 +96,25 @@ class DlrmHSTUConfig:
     use_layer_norm_postprocessor: bool = False
 
 
+def _get_supervision_labels_and_weights(
+    supervision_bitmasks: torch.Tensor,
+    watchtime_sequence: torch.Tensor,
+    task_configs: List[TaskConfig],
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    supervision_labels: Dict[str, torch.Tensor] = {}
+    supervision_weights: Dict[str, torch.Tensor] = {}
+    for task in task_configs:
+        if task.task_type == MultitaskTaskType.REGRESSION:
+            supervision_labels[task.task_name] = watchtime_sequence
+        elif task.task_type == MultitaskTaskType.BINARY_CLASSIFICATION:
+            supervision_labels[task.task_name] = (
+                torch.bitwise_and(supervision_bitmasks, task.task_weight) > 0
+            ).to(torch.float32)
+        else:
+            raise RuntimeError("Unsupported MultitaskTaskType")
+    return supervision_labels, supervision_weights
+
+
 class DlrmHSTU(HammerModule):
     def __init__(  # noqa C901
         self,
@@ -115,9 +133,8 @@ class DlrmHSTU(HammerModule):
             device=torch.device("meta"),
         )
 
-        # multitask configs, must sort by task types
+        # multitask configs must be sorted by task types
         self._multitask_configs: List[TaskConfig] = hstu_configs.multitask_configs
-        self._multitask_configs.sort(key=lambda x: x.task_type)
         self._multitask_module = DefaultMultitaskModule(
             task_configs=self._multitask_configs,
             embedding_dim=hstu_configs.hstu_transducer_embedding_dim,
@@ -126,8 +143,6 @@ class DlrmHSTU(HammerModule):
                 SwishLayerNorm(512),
                 torch.nn.Linear(in_features=512, out_features=num_tasks),
             ).apply(init_mlp_weights_optional_bias),
-            candidates_weight_feature_name=self._hstu_configs.candidates_weight_feature_name,
-            candidates_watchtime_feature_name=self._hstu_configs.candidates_watchtime_feature_name,
             causal_multitask_weights=hstu_configs.causal_multitask_weights,
             is_inference=self._is_inference,
         )
@@ -233,16 +248,13 @@ class DlrmHSTU(HammerModule):
         seq_embeddings: Dict[str, SequenceEmbedding],
     ) -> Dict[str, torch.Tensor]:
         if len(self._hstu_configs.contextual_feature_to_max_length) > 0:
-            contextual_lengths = torch.stack(
-                [
-                    seq_embeddings[x].lengths
-                    for x in self._hstu_configs.contextual_feature_to_max_length.keys()
-                ],
-                dim=0,
-            )
-            contextual_offsets = torch.ops.gr.batched_complete_cumsum(
-                contextual_lengths
-            )
+            contextual_offsets: List[torch.Tensor] = []
+            for x in self._hstu_configs.contextual_feature_to_max_length.keys():
+                contextual_offsets.append(
+                    torch.ops.fbgemm.asynchronous_complete_cumsum(
+                        seq_embeddings[x].lengths
+                    )
+                )
         else:
             # Dummy, offsets are unused
             contextual_offsets = torch.empty((0, 0))
@@ -455,11 +467,23 @@ class DlrmHSTU(HammerModule):
                 num_candidates=num_candidates,
             )
         with record_function("## multitask_module ##"):
+            supervision_labels, supervision_weights = (
+                _get_supervision_labels_and_weights(
+                    supervision_bitmasks=payload_features[
+                        self._hstu_configs.candidates_weight_feature_name
+                    ],
+                    watchtime_sequence=payload_features[
+                        self._hstu_configs.candidates_watchtime_feature_name
+                    ],
+                    task_configs=self._multitask_configs,
+                )
+            )
             mt_target_preds, mt_target_labels, mt_target_weights, mt_losses = (
                 self._multitask_module(
                     encoded_user_embeddings=candidates_user_embeddings,
                     item_embeddings=candidates_item_embeddings,
-                    payload_features=payload_features,
+                    supervision_labels=supervision_labels,
+                    supervision_weights=supervision_weights,
                 )
             )
 
