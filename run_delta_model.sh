@@ -1,0 +1,3 @@
+CUDA_VISIBLE_DEVICES=0 python3 main.py --gin_config_file=configs/ml-20m/hstu-sampled-softmax-n128-large-final-l200-be50_d3_15-03-02.gin --master_port=12345
+CUDA_VISIBLE_DEVICES=0 python3 main.py --gin_config_file=configs/ml-20m/hstu-sampled-softmax-n128-large-final-l200-be50_d3_15-03-16.gin --master_port=12345
+CUDA_VISIBLE_DEVICES=0 python3 main.py --gin_config_file=configs/ml-20m/hstu-sampled-softmax-n128-large-final-l200-be50_d3_15-03-30.gin --master_port=12345

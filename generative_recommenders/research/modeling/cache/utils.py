@@ -184,8 +184,13 @@ def get_recompute_indices(
     else:
         return delta_x_indices, delta_lengths, valid_mask
 
-    diff_k = (cached_k - compute_k).abs().sum(dim=-1)
-    diff_v = (cached_v - compute_v).abs().sum(dim=-1)
+    if False and "use absolute distance":
+        diff_k = (cached_k - compute_k).abs().sum(dim=-1)
+        diff_v = (cached_v - compute_v).abs().sum(dim=-1)
+
+    if True and "use L2 norm distance":
+        diff_k = torch.norm(cached_k - compute_k, p=2, dim=-1)
+        diff_v = torch.norm(cached_v - compute_v, p=2, dim=-1)
     diff_total =  diff_k + diff_v
 
     valid_diff = torch.where(valid_mask, diff_total, -torch.inf)

@@ -16,6 +16,7 @@
 
 import logging
 import os
+os.environ['NUMEXPR_MAX_THREADS'] = '64'
 import random
 
 import time
@@ -127,7 +128,7 @@ def train_fn(
     eval_interval: int = 100,
     full_eval_every_n: int = 1,
     # save_ckpt_every_n: int = 1000,
-    save_ckpt_every_n: int = 1,
+    save_ckpt_every_n: int = 3,
     partial_eval_num_iters: int = 32,
     embedding_module_type: str = "local",
     item_embedding_dim: int = 240,
@@ -137,6 +138,10 @@ def train_fn(
     enable_tf32: bool = False,
     random_seed: int = 42,
     train_file: str = None,
+    load_base_model = False,
+    base_model_path: str = None,
+    use_my_own_ckpt_name = False,
+    new_ckpt_base_name: str = None,
 ) -> None:
     # to enable more deterministic results.
     random.seed(random_seed)
@@ -294,6 +299,21 @@ def train_fn(
     ar_loss = ar_loss.to(device)
     negatives_sampler = negatives_sampler.to(device)
     model = DDP(model, device_ids=[rank], broadcast_buffers=False)
+
+    if load_base_model:
+        if base_model_path is not None:
+            ckpt_device = f'cuda:{rank}' if torch.cuda.is_available() else 'cpu'
+            checkpoint = torch.load(base_model_path, map_location=ckpt_device, weights_only=True)
+            state_dict = checkpoint["model_state_dict"]
+            try:
+                model.load_state_dict(state_dict, strict=True)
+            except RuntimeError as e:
+                print("Error in loading model state dict:", e)
+            print(f"*"*80)
+            print(f"[loading base model] from: {base_model_path}")
+            print(f"*"*80)
+        else:
+            print(f"[error] the base model path is None, randomly init...")
 
     # TODO: wrap in create_optimizer.
     opt = torch.optim.AdamW(
@@ -533,18 +553,30 @@ def train_fn(
                     world_size=world_size,
                 )
         if rank == 0 and epoch > 0 and (epoch % save_ckpt_every_n) == 0:
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": opt.state_dict(),
-                },
-                f"./ckpts/{model_desc}_ep{epoch}",
-            )
+            if use_my_own_ckpt_name:
+                new_ckpt_name = f"{new_ckpt_base_name}_ep{epoch}.ckpt"
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": opt.state_dict(),
+                    },
+                    new_ckpt_name,
+                )
+                print(f"[saving checkpoint] at: {new_ckpt_name}")
+            else:
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": opt.state_dict(),
+                    },
+                    f"./ckpts/{model_desc}_ep{epoch}",
+                )                
 
         if only_train_flag:
             logging.info(
-                f"rank {rank}: eval @ epoch {epoch} in {time.time() - eval_start_time:.2f}s: "
+                f"rank {rank}: eval @ epoch {epoch}"
             )
         else:
             logging.info(
