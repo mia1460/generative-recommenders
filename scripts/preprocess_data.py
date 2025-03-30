@@ -495,7 +495,7 @@ def plot_1_model_selective_metrics_from_full_test_csv(csv_file, model_name, outp
         plt.close()  # 确保关闭画布
         print(f"plot failure! {str(e)}")
 
-def plot_metrics(csv_file, selected_metrics, skip_model, output_dir='/home/yinj@/datas/grkvc/graphs', image_prefix='hahaha'):
+def plot_metrics(csv_file, selected_metrics, skip_model, output_dir='/home/yinj@/datas/grkvc/graphs', image_prefix='hahaha', y_lim=False):
     # 读取CSV文件
     df = pd.read_csv(csv_file)
     
@@ -506,6 +506,31 @@ def plot_metrics(csv_file, selected_metrics, skip_model, output_dir='/home/yinj@
     # 1. 绘制不同recompute_ratio指标对比图，排布成一张图，4行3列
     fig, axes = plt.subplots(len(model_names), len(selected_metrics), figsize=(15, 5 * len(model_names)))
     axes = axes.flatten()  # 将 2D 数组展平为 1D 方便索引
+
+    # 为每个指标计算全局的纵坐标范围
+    global_y_limits = {}
+    if y_lim:
+        for metric in selected_metrics:
+            global_y_min, global_y_max = None, None
+            
+            # 查找每个指标的最小值和最大值
+            for model_name in model_names:
+                df_model = df[df["model_name"] == model_name]
+                df_cache_selective = df_model[df_model["cache_type"] == "selective"]
+                
+                metric_values = df_cache_selective[metric].values
+                
+                # 获取当前指标的最小值和最大值
+                min_value = metric_values.min()
+                max_value = metric_values.max()
+
+                # 更新全局最小值和最大值
+                if global_y_min is None or min_value < global_y_min:
+                    global_y_min = min_value
+                if global_y_max is None or max_value > global_y_max:
+                    global_y_max = max_value
+
+            global_y_limits[metric] = (global_y_min, global_y_max)
 
     for idx, model_name in enumerate(model_names):
         df_model = df[df["model_name"] == model_name]
@@ -525,18 +550,29 @@ def plot_metrics(csv_file, selected_metrics, skip_model, output_dir='/home/yinj@
             # 添加两条水平虚线，代表no和fully对应的指标
             no_value = df_model[df_model["cache_type"] == "no"][metric].iloc[0]
             fully_value = df_model[df_model["cache_type"] == "fully"][metric].iloc[0]
+            middle_value = fully_value + 0.9 * (no_value - fully_value)
+
             ax.axhline(no_value, color='red', linestyle='--', label="no cache")
             ax.axhline(fully_value, color='blue', linestyle='--', label="fully cache")
+            ax.axhline(middle_value, color='green', linestyle='--', label="90% between no and fully")
 
             ax.set_title(f"{metric} vs Recompute Ratio ({model_name})")
             ax.set_xlabel("Recompute Ratio")
             ax.set_ylabel(metric)
             ax.grid(True)
 
+            # 设置纵坐标范围
+            if y_lim:
+                y_min, y_max = global_y_limits[metric]
+                ax.set_ylim(y_min, y_max)  # 设置该指标的纵坐标范围
+
             ax.legend()
 
     # 保存图片
-    image_filename = os.path.join(output_dir, f"{image_prefix}_recompute_ratio_metrics.png")
+    if y_lim == True:
+        image_filename = os.path.join(output_dir, f"{image_prefix}_wYLim_recompute_ratio_metrics.png")
+    else:
+        image_filename = os.path.join(output_dir, f"{image_prefix}_recompute_ratio_metrics.png")
     plt.tight_layout()
     plt.savefig(image_filename)
     plt.close()
@@ -594,7 +630,7 @@ def plot_metrics(csv_file, selected_metrics, skip_model, output_dir='/home/yinj@
             fully_metric_value = df_model[df_model["cache_type"] == "fully"][metric].iloc[0]
             
             # 获取日期部分
-            model_date = model_name.split('_')[-1]  # 假设日期在模型名的最后部分，格式如 model_02-02
+            model_date = model_name.split('_')[-2]  # 假设日期在模型名的最后部分，格式如 model_02-02
             x_position = j  # 偏移量，确保柱状图不重叠
             
             # 绘制柱状图
@@ -610,7 +646,7 @@ def plot_metrics(csv_file, selected_metrics, skip_model, output_dir='/home/yinj@
         ax.set_xlabel("Model Name")
         ax.set_ylabel(f"{metric}")
         ax.set_xticks(range(len(model_names)))  # 横坐标位置
-        ax.set_xticklabels([model_name.split('_')[-1] for model_name in model_names])  # 横坐标标签为日期
+        ax.set_xticklabels([model_name.split('_')[-2] for model_name in model_names])  # 横坐标标签为日期
         ax.grid(True, linestyle='--', alpha=0.35)
 
     # 保存图片
@@ -777,21 +813,80 @@ def plot_layer_correlation(diff_file_path, output_dir, output_prefix, threshold=
 
     print(f"layer correlateion saved {output_path}")
 
+def plot_kv_diff_cdf(diff_file_path, output_dir, output_prefix, threshold=None, title=None):
+    # 确保输出文件夹存在
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 加载差异文件
+    kv_diff_list = torch.load(diff_file_path)  # 形状为 (16, L)，每个元素为一个tensor
+    
+    # 创建颜色映射（蓝色渐变）
+    cmap = plt.cm.Blues  # 蓝色渐变色
+    norm = plt.Normalize(vmin=0, vmax=len(kv_diff_list) - 1)  # 正常化颜色范围
+
+    # 创建图形
+    fig, ax = plt.subplots(figsize=(10, 6))  # 使用fig, ax创建图形
+    
+    # 绘制每层的CDF
+    for i, kv_diff in enumerate(kv_diff_list):
+        # 将每层的差异值合并成一个1D张量
+        all_kv_diffs = kv_diff.numpy()  # 转换为numpy数组以便后续处理
+
+        # 计算CDF
+        sorted_kv_diffs = np.sort(all_kv_diffs)  # 排序
+        cdf = np.arange(1, len(sorted_kv_diffs) + 1) / len(sorted_kv_diffs)  # 计算CDF
+
+        # 为每一层分配一个渐变色
+        color = cmap(norm(i))  # 获取每层的颜色
+
+        # 绘制当前层的CDF曲线
+        ax.plot(sorted_kv_diffs, cdf, marker='.', linestyle='-', color=color)
+
+    # 设置图表标题与标签
+    ax.set_title(title or 'CDF of KV Diff for All Layers')
+    ax.set_xlabel('KV Diff Value')
+    ax.set_ylabel('CDF')
+    ax.grid(True)
+
+    # 绘制虚线（如果传入了阈值）
+    if threshold is not None:
+        ax.axvline(
+            threshold, 
+            color='red',  # 红色
+            linestyle='--',  # 虚线
+            linewidth=1.5,  # 线宽
+            label=f'Threshold: {threshold}'  # 图例标签
+        )
+        ax.legend()  # 显示图例
+
+    # 添加颜色条（用于显示渐变的图例）
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])  # 空数组，用于生成颜色条
+    cbar = plt.colorbar(sm, ax=ax)  # 显式传递ax给colorbar
+    cbar.set_label('Layer Number')  # 设置颜色条的标签
+
+    # 保存图
+    output_path = os.path.join(output_dir, f"{output_prefix}_kv_diff_cdf.png")
+    plt.savefig(output_path, bbox_inches='tight', dpi=300)
+    plt.close()
+
+    print(f"CDF plot saved at {output_path}")
+
 train_200_csv_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_train_max_200.csv'
 test_200_csv_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200.csv'
 test_full_200_csv_file = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200.csv'
 
 if False and "compute kv diff":
-    cache_1 = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-02/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_1_cache_on_cpu.pt'
-    cache_2 = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-16/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_1_cache_on_cpu.pt'
-    length_file = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-16/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_1_lengths_on_cpu.pt'
+    cache_1 = '/mnt/data/gbase/yinj/grkvc/cached_kv/model_ep50_15-02-02/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_0_cache_on_cpu.pt'
+    cache_2 = '/mnt/data/gbase/yinj/grkvc/cached_kv/model_b50_15-02-16_ep3/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_0_cache_on_cpu.pt'
+    length_file = '/mnt/data/gbase/yinj/grkvc/cached_kv/model_ep50_15-02-02/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_0_lengths_on_cpu.pt'
     output_dir = '/home/yinj@/datas/grkvc/diff_kv/'
-    output_prefix = '15-02-02_vs_15-02-16_batch_1'
+    output_prefix = 'model_ep50_15-02-02_vs_model_b50_15-02-16_ep3'
     compute_kv_diff(file1=cache_1, file2=cache_2, length_file=length_file, output_dir=output_dir, output_prefix=output_prefix)
 
 if False and "see the kv diff's content":
-    k_diff_file = '/home/yinj@/datas/grkvc/diff_kv/15-02-02_vs_15-02-16_batch_1_k_diff.pt'
-    kv_diff_file = '/home/yinj@/datas/grkvc/diff_kv/15-02-02_vs_15-02-16_batch_1_kv_diff.pt'
+    k_diff_file = '/home/yinj@/datas/grkvc/diff_kv/model_ep50_15-02-02_vs_model_b50_15-02-16_ep3_k_diff.pt'
+    kv_diff_file = '/home/yinj@/datas/grkvc/diff_kv/model_ep50_15-02-02_vs_model_b50_15-02-16_ep3_kv_diff.pt'
     k_diff = torch.load(k_diff_file)
     kv_diff = torch.load(kv_diff_file)
     print(f"k: len-{len(k_diff)}, shape-{k_diff[0].shape}, kv: len-{len(kv_diff)}, shape-{kv_diff[0].shape}")
@@ -808,13 +903,22 @@ if False and "[maybe wrong] plot kv diff heatmap by user_id and layer_id":
         plot_diff_heatmap(diff_file_path=data_file_prefix+suffix, output_dir=output_dir, output_prefix=output_prefix+suffix.replace('.pt', ''), token_start=token_start, token_end=token_end)
 
 if False and "plot correlation":
-    data_file_prefix = '/home/yinj@/datas/grkvc/diff_kv/15-02-02_vs_15-02-16_batch_1_'
+    data_file_prefix = '/home/yinj@/datas/grkvc/diff_kv/model_ep50_15-02-02_vs_model_b50_15-02-16_ep3_'
     output_dir = '/home/yinj@/datas/grkvc/diff_kv/'
-    output_prefix = '15-02-02_vs_15-02-16_batch_1_'
+    output_prefix = 'model_ep50_15-02-02_vs_model_b50_15-02-16_ep3_'
     suffixes = ['k_diff.pt', 'v_diff.pt', 'kv_diff.pt']
     threshold = 0.75
     for suffix in suffixes:
         plot_layer_correlation(diff_file_path=data_file_prefix+suffix, output_dir=output_dir, output_prefix=output_prefix+suffix.replace('.pt', ''), threshold=threshold)
+
+if False and "plot CDF":
+    data_file_prefix = '/home/yinj@/datas/grkvc/diff_kv/model_ep50_15-02-02_vs_model_b50_15-02-16_ep3_'
+    output_dir = '/home/yinj@/datas/grkvc/diff_kv/'
+    output_prefix = 'model_ep50_15-02-02_vs_model_b50_15-02-16_ep3_'
+    suffixes = ['kv_diff.pt']
+    threshold = 0.75
+    for suffix in suffixes:
+        plot_kv_diff_cdf(diff_file_path=data_file_prefix+suffix, output_dir=output_dir, output_prefix=output_prefix+suffix.replace('.pt', ''))    
 
 if False and "load cached_kv see what is in it":
     cached_kv_file = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-02-16/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100/batch_1_cache_on_cpu.pt'
@@ -830,18 +934,25 @@ if False and "convert log to csv":
     log_file = '/home/yinj@/datas/grkvc/perfect_datas/about_5_model_no_fully_selective_range_r_metrics_full_200.log'
     log_file = '/home/yinj@/datas/grkvc/perfect_datas/b150_d10_f200.log'
     log_file = '/home/yinj@/datas/grkvc/perfect_datas/b100_d5_f200.log'
+    log_file = '/home/yinj@/datas/grkvc/result_logs/see_base_ep50_d3_3_type_range_r.log'
+    log_file = '/home/yinj@/datas/grkvc/result_logs/see_base_ep50_d3_3_type_range_r_w_l2_distance.log'
     convert_log_to_csv(input_file=log_file)
 
-if False and "plot recompute_ratio_metrics, recompute_ratio_time, loss pictures":
+if True and "plot recompute_ratio_metrics, recompute_ratio_time, loss pictures":
     csv_file = '/home/yinj@/datas/grkvc/perfect_datas/about_5_model_no_fully_selective_range_r_metrics_full_200.csv'
     csv_file = '/home/yinj@/datas/grkvc/perfect_datas/b150_d10_f200.csv'
     csv_file = '/home/yinj@/datas/grkvc/perfect_datas/b100_d5_f200.csv'
+    csv_file = '/home/yinj@/datas/grkvc/result_logs/see_base_ep50_d3_3_type_range_r.csv'
+    csv_file = '/home/yinj@/datas/grkvc/result_logs/see_base_ep50_d3_3_type_range_r_w_l2_distance.csv'
     selected_metrics = ['NDCG@10', 'HR@10', 'MRR']
     skip_model = 'model_ep20_15-02-02'
+    skip_model = 'model_ep50_15-02-02'
     image_prefix = 'b100_d10'
-    image_prefix = 'b150_d10'
-    image_prefix = 'b100_d5'
-    plot_metrics(csv_file=csv_file, selected_metrics=selected_metrics, skip_model=skip_model, image_prefix=image_prefix)
+    image_prefix = 'b100_d10_l2'
+    # image_prefix = 'b150_d10'
+    # image_prefix = 'b100_d5'
+    y_lim = True
+    plot_metrics(csv_file=csv_file, selected_metrics=selected_metrics, skip_model=skip_model, image_prefix=image_prefix, y_lim=y_lim)
 
 if False and "plot one model selective metrics from full test csv":
     csv_file = '/home/yinj@/datas/grkvc/perfect_datas/about_5_model_no_fully_selective_range_r_metrics_full_200.csv'

@@ -203,11 +203,12 @@ def save_batch_base_cache_and_lengths(
     base_cache_dir,
     base_lengths_dir,
     data_prefix,
+    base_model_name,
     use_gpu=False,
 ):
     start_time = time.time()
-    cache_dir = os.path.join(base_cache_dir, data_prefix)
-    lengths_dir = os.path.join(base_cache_dir, data_prefix)
+    cache_dir = os.path.join(base_cache_dir, base_model_name, data_prefix)
+    lengths_dir = os.path.join(base_cache_dir, base_model_name, data_prefix)
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
     if not os.path.exists(lengths_dir):

@@ -119,7 +119,7 @@ USE_CKPT_FILE = True
 RECOMPUTE_RATIO=20
 
 # for save base_cache_list and cached_lengths_list
-NEED_SAVE_BC = False
+NEED_SAVE_BC = True
 
 # [eval_body]
 # load config
@@ -130,13 +130,13 @@ gin.parse_config(filtered_config)
 # eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_loss_last5.csv'
 # eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test.csv'
 
-if False and "load data of b100, d10":
+if True and "load data of b100, d10":
     eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100.csv'
     eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_110.csv'
-if True and "load data of b150, d10":
+if False and "load data of b150, d10":
     eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_150.csv'
     eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_160.csv'
-if True and "load data of b100, d5":
+if False and "load data of b100, d5":
     eval_base_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_100.csv'
     eval_delta_path = '/home/yinj@/datas/grkvc/use_data/ml_20m_sasrec_format_by_user_test_max_200_full_200_max_105.csv'
 
@@ -281,7 +281,10 @@ def get_filenames_in_folder_os(ckpt_dir):
     return filenames
 
 ckpt_dir = '/home/yinj@/datas/grkvc/ckpts/ml-20m'
-ckpt_files = get_filenames_in_folder_os(ckpt_dir)
+base_ckpt_dir = '/home/yinj@/datas/grkvc/ckpts/ml-20m/base_model'
+delta_ckpt_dir = '/home/yinj@/datas/grkvc/ckpts/ml-20m/delta_model'
+ckpt_files = get_filenames_in_folder_os(base_ckpt_dir)
+# ckpt_files = get_filenames_in_folder_os(delta_ckpt_dir)
 base_ckpt_file = ckpt_files[0]
 
 if True and "load base ckpt":
@@ -342,15 +345,16 @@ if False and "generate different models' kv cache":
     # base_cache_dir = '/mnt/data/gbase/yinj/grkvc/cached_kv/15-03-30/'
     print("hahaha")
 data_prefix = os.path.splitext(os.path.basename(eval_base_path))[0]
+base_model_name = os.path.splitext(os.path.basename(base_ckpt_file))[0]
 use_gpu_flag = False
 if NEED_SAVE_BC:
     if False and "saved at one file":
         save_base_cache_and_lengths(data_loader=eval_base_loader, device=device, gr_output_length=gr_output_length, eval_state=eval_state, model=model, eval_batch_size=local_batch_size, main_module_bf16=main_module_bf16, world_size=world_size, base_cache_path=base_cache_path, cached_lengths_path=cached_lengths_path, use_gpu=use_gpu_flag)
     if True and "saved at multi small file":
-        cache_dir, lengths_dir = save_batch_base_cache_and_lengths(data_loader=eval_base_loader, device=device, gr_output_length=gr_output_length, eval_state=eval_state, model=model, eval_batch_size=local_batch_size, main_module_bf16=main_module_bf16, world_size=world_size, base_cache_dir=base_cache_dir, base_lengths_dir=base_cache_dir, data_prefix=data_prefix, use_gpu=use_gpu_flag)
+        cache_dir, lengths_dir = save_batch_base_cache_and_lengths(data_loader=eval_base_loader, device=device, gr_output_length=gr_output_length, eval_state=eval_state, model=model, eval_batch_size=local_batch_size, main_module_bf16=main_module_bf16, world_size=world_size, base_cache_dir=base_cache_dir, base_lengths_dir=base_cache_dir, data_prefix=data_prefix, base_model_name=base_model_name, use_gpu=use_gpu_flag)
 else:
-    cache_dir = os.path.join(base_cache_dir, data_prefix)
-    lengths_dir = os.path.join(base_cache_dir, data_prefix)
+    cache_dir = os.path.join(base_cache_dir, base_model_name, data_prefix)
+    lengths_dir = os.path.join(base_cache_dir, base_model_name, data_prefix)
 
 if False and "load base cache":
     print(f"begin loading base cache from {base_cache_path}, and lengths from {cached_lengths_path}")
@@ -380,7 +384,7 @@ if False and "convert a full base cache to multi small file, while each contains
 # print(f"base_cache_list[0][0][0].shape is {base_cache_list[0][0][0]}, cached_lengths_list[0] is {cached_lengths_list[0]}")
 # print(f"the first user's cached length is {cached_lengths_list[0][0]}") # 43
 # print(f"base_cache: the first user's cached_k is {base_cache_list[0][:][2][:cached_lengths_list[0][0]].shape}\ncached_v is {base_cache_list[0][:][0][:cached_lengths_list[0][0]].shape}")
-if True:
+if False:
     run_an_e2e(
         cache_use_type = "no",
         data_loader=eval_delta_loader,
@@ -398,7 +402,7 @@ if True:
         # enable_profiler=True,
     )
 
-# if False:
+# if True:
     run_an_e2e(
         cache_use_type = "fully",
         data_loader=eval_delta_loader,
@@ -444,8 +448,9 @@ if True:
         # enable_profiler=True,
     )
 
-if True:
-    for i in range(1, 5):
+# if True:
+    ckpt_files = get_filenames_in_folder_os(delta_ckpt_dir)
+    for i in range(0, 4):
         ckpt_path = ckpt_files[i]
     
         load_ckpt(
@@ -486,6 +491,7 @@ if True:
                 return_encoded_embeddings=False,
                 # enable_profiler=True,
             )    
+        if True:
             run_an_e2e(
                 cache_use_type = "fully",
                 data_loader=eval_delta_loader,
